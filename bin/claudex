@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_DIR="__CLAUDEX_INSTALL_DIR__"
+API_KEY_FILE="$INSTALL_DIR/api-key"
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "Claude Code binary not found. Install it first, then rerun claudex." >&2
+  exit 1
+fi
+
+if [[ ! -f "$API_KEY_FILE" ]]; then
+  echo "Missing $API_KEY_FILE. Run ./install.sh from the claudex repo." >&2
+  exit 1
+fi
+
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8317}"
+export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$(cat "$API_KEY_FILE")}"
+
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDEX_OPUS_MODEL:-${ANTHROPIC_DEFAULT_OPUS_MODEL:-gpt-5-codex(high)}}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${CLAUDEX_SONNET_MODEL:-${ANTHROPIC_DEFAULT_SONNET_MODEL:-gpt-5-codex(medium)}}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDEX_HAIKU_MODEL:-${ANTHROPIC_DEFAULT_HAIKU_MODEL:-gpt-5-codex(low)}}"
+
+# Claude Code 1.x compatibility.
+export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-$ANTHROPIC_DEFAULT_SONNET_MODEL}"
+export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-$ANTHROPIC_DEFAULT_HAIKU_MODEL}"
+
+exec claude "$@"

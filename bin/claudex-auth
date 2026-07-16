@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: claudex-auth <codex|claude|codex-device|status>
+
+Commands:
+  codex         Browser OAuth login for OpenAI/Codex
+  codex-device  Device-code OAuth login for headless machines
+  claude        Browser OAuth login for Claude Code/Anthropic
+  status        List saved auth files
+USAGE
+}
+
+cliproxy_bin() {
+  if command -v cliproxyapi >/dev/null 2>&1; then echo cliproxyapi; return; fi
+  if command -v cli-proxy-api >/dev/null 2>&1; then echo cli-proxy-api; return; fi
+  if [[ -x "__CLAUDEX_INSTALL_DIR__/bin/cli-proxy-api" ]]; then echo "__CLAUDEX_INSTALL_DIR__/bin/cli-proxy-api"; return; fi
+  echo "CLIProxyAPI not found. Run install.sh first." >&2
+  exit 1
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  codex)
+    exec "$(cliproxy_bin)" -codex-login
+    ;;
+  codex-device)
+    exec "$(cliproxy_bin)" -codex-device-login
+    ;;
+  claude)
+    exec "$(cliproxy_bin)" -claude-login
+    ;;
+  status)
+    find "$HOME/.cli-proxy-api" -maxdepth 2 -type f | sed "s#^$HOME#~#" | sort
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown auth command: $cmd" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
