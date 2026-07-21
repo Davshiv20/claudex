@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_DIR="__CLAUDEX_INSTALL_DIR__"
+MODELS_CONF="$INSTALL_DIR/models.conf"
+API_KEY_FILE="$INSTALL_DIR/api-key"
+BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8317}"
+
+usage() {
+  cat <<'USAGE'
+Usage: claudex-models <command>
+
+Commands:
+  list                       Show every model your account can use (needs proxy running)
+  show                       Show what each slot maps to right now
+  set                        Interactively pick models for all three slots
+  set <slot>                 Interactively pick a model for one slot (opus|sonnet|haiku)
+  set <slot> <model>         Set a slot directly, no prompts
+  edit                       Open models.conf in your editor
+
+Examples:
+  claudex-models set                        # guided picker for Opus, Sonnet, Haiku
+  claudex-models set opus                    # guided picker for just Opus
+  claudex-models set haiku gpt-5.4-mini(low) # direct, no prompts
+USAGE
+}
+
+# --- helpers ---------------------------------------------------------------
+
+# Read one slot (OPUS/SONNET/HAIKU) from models.conf, ignoring comments/whitespace.
+read_slot() {
+  [[ -f "$MODELS_CONF" ]] || return 0
+  local line
+  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$MODELS_CONF" 2>/dev/null | tail -1)" || true
+  [[ -z "$line" ]] && return 0
+  line="${line#*=}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  line="${line%\"}"; line="${line#\"}"
+  line="${line%\'}"; line="${line#\'}"
+  printf '%s' "$line"
+}
+
+# Print every model id the proxy exposes, one per line (unfiltered).
+fetch_model_ids() {
+  [[ -f "$API_KEY_FILE" ]] || { echo "Missing $API_KEY_FILE. Run install.sh first." >&2; return 1; }
+  local key
+  key="$(cat "$API_KEY_FILE")"
+  curl -fsS "$BASE_URL/v1/models" -H "Authorization: Bearer $key" 2>/dev/null \
+    | python3 -c 'import json,sys
+data = json.load(sys.stdin).get("data", [])
+for m in sorted(data, key=lambda x: x.get("id","")):
+    mid = m.get("id","")
+    if mid:
+        print(mid)'
+}
+
+# Write "SLOT = model" to models.conf, replacing an existing line or appending.
+write_slot() {
+  local slot="$1" model="$2"
+  case "$model" in
+    *'#'*|*'&'*) echo "Model name contains an unsupported character (# or &)." >&2; return 1 ;;
+  esac
+  touch "$MODELS_CONF"
+  if grep -qE "^[[:space:]]*$slot[[:space:]]*=" "$MODELS_CONF"; then
+    local tmp
+    tmp="$(mktemp)"
+    sed -E "s#^([[:space:]]*$slot[[:space:]]*=).*#\1 $model#" "$MODELS_CONF" > "$tmp"
+    mv "$tmp" "$MODELS_CONF"
+  else
+    printf '%s = %s\n' "$slot" "$model" >> "$MODELS_CONF"
+  fi
+}
+
+# Load chat models into the MODEL_IDS array (image models hidden for now).
+load_model_ids() {
+  local raw m
+  raw="$(fetch_model_ids)" || return 1
+  MODEL_IDS=()
+  while IFS= read -r m; do
+    [[ -z "$m" ]] && continue
+    case "$m" in gpt-image-*) continue ;; esac
+    MODEL_IDS+=("$m")
+  done <<< "$raw"
+  [[ ${#MODEL_IDS[@]} -gt 0 ]] || { echo "No chat models available from $BASE_URL." >&2; return 1; }
+}
+
+# Prompt the user to choose one model; echoes the chosen id on stdout.
+# Menu/prompts go to stderr so stdout captures only the selection.
+choose_model() {
+  local label="$1"
+  if command -v fzf >/dev/null 2>&1; then
+    printf '%s\n' "${MODEL_IDS[@]}" | fzf --prompt="$label > " --height=40% --reverse
+    return
+  fi
+  local i=1 m pick
+  for m in "${MODEL_IDS[@]}"; do
+    printf '  %2d) %s\n' "$i" "$m" >&2
+    i=$((i + 1))
+  done
+  while true; do
+    printf '%s [1-%d]: ' "$label" "${#MODEL_IDS[@]}" >&2
+    read -r pick </dev/tty || return 1
+    if [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#MODEL_IDS[@]} )); then
+      printf '%s' "${MODEL_IDS[$((pick - 1))]}"
+      return 0
+    fi
+    printf '  Please enter a number between 1 and %d.\n' "${#MODEL_IDS[@]}" >&2
+  done
+}
+
+# Prompt for reasoning effort; echoes a suffix like "(high)" or "" for none.
+choose_effort() {
+  local pick
+  {
+    echo "  1) high"
+    echo "  2) medium  (default)"
+    echo "  3) low"
+    echo "  4) none"
+  } >&2
+  printf 'Reasoning effort [1-4, Enter=medium]: ' >&2
+  read -r pick </dev/tty || pick=""
+  case "$pick" in
+    1) printf '(high)' ;;
+    ""|2) printf '(medium)' ;;
+    3) printf '(low)' ;;
+    4) printf '' ;;
+    *) printf '(medium)' ;;
+  esac
+}
+
+slot_desc() {
+  case "$1" in
+    OPUS)   printf 'most capable — hard, long-running tasks' ;;
+    SONNET) printf 'balanced everyday default' ;;
+    HAIKU)  printf 'fast & cheap — quick + background work' ;;
+  esac
+}
+
+# Guided picker. Optional arg = a single slot; no arg = all three in sequence.
+run_picker() {
+  if [[ ! -t 1 ]]; then
+    echo "The picker needs an interactive terminal. Use: claudex-models set <slot> <model>" >&2
+    exit 1
+  fi
+  if ! load_model_ids; then
+    echo "Could not load models from $BASE_URL." >&2
+    echo "Start the proxy first:  claudex-proxy start" >&2
+    exit 1
+  fi
+
+  local slots
+  if [[ -n "${1:-}" ]]; then slots=("$1"); else slots=(OPUS SONNET HAIKU); fi
+  local total=${#slots[@]} idx=0 slot model effort current
+  for slot in "${slots[@]}"; do
+    idx=$((idx + 1))
+    current="$(read_slot "$slot")"
+    echo "" >&2
+    printf '\033[1;34m[%d/%d] %s\033[0m — %s\n' "$idx" "$total" "$slot" "$(slot_desc "$slot")" >&2
+    printf '  current: %s\n' "${current:-<unset>}" >&2
+    model="$(choose_model "Choose model for $slot")" || { echo "Cancelled." >&2; exit 1; }
+    [[ -z "$model" ]] && { echo "Cancelled." >&2; exit 1; }
+    effort="$(choose_effort)"
+    write_slot "$slot" "${model}${effort}" || exit 1
+    printf '  \033[1;32m✓ %s = %s%s\033[0m\n' "$slot" "$model" "$effort" >&2
+  done
+  echo "" >&2
+  echo "Done. Restart claudex to use the new map." >&2
+}
+
+# --- dispatch --------------------------------------------------------------
+
+case "${1:-}" in
+  list)
+    if ! ids="$(fetch_model_ids)"; then
+      echo "Could not reach the proxy at $BASE_URL. Start it with: claudex-proxy start" >&2
+      exit 1
+    fi
+    printf '%s\n' "$ids" | sed 's/^/  /'
+    ;;
+  show)
+    echo "Model map ($MODELS_CONF):"
+    for slot in OPUS SONNET HAIKU; do
+      val="$(read_slot "$slot")"
+      printf '  %-7s -> %s\n' "$slot" "${val:-<unset, using built-in default>}"
+    done
+    ;;
+  set)
+    if [[ -z "${2:-}" ]]; then
+      run_picker
+      exit 0
+    fi
+    slot="$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')"
+    case "$slot" in
+      OPUS|SONNET|HAIKU) ;;
+      *) echo "slot must be one of: opus | sonnet | haiku" >&2; exit 1 ;;
+    esac
+    if [[ -z "${3:-}" ]]; then
+      run_picker "$slot"
+      exit 0
+    fi
+    write_slot "$slot" "$3" || exit 1
+    echo "Set $slot = $3"
+    echo "Restart claudex for the change to take effect."
+    ;;
+  edit)
+    "${EDITOR:-vi}" "$MODELS_CONF"
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

@@ -3,6 +3,7 @@ set -euo pipefail
 
 INSTALL_DIR="__CLAUDEX_INSTALL_DIR__"
 API_KEY_FILE="$INSTALL_DIR/api-key"
+MODELS_CONF="$INSTALL_DIR/models.conf"
 
 if ! command -v claude >/dev/null 2>&1; then
   echo "Claude Code binary not found. Install it first, then rerun claudex." >&2
@@ -14,15 +15,37 @@ if [[ ! -f "$API_KEY_FILE" ]]; then
   exit 1
 fi
 
+# Read one slot (OPUS/SONNET/HAIKU) from models.conf, ignoring comments/whitespace.
+read_slot() {
+  [[ -f "$MODELS_CONF" ]] || return 0
+  local line
+  line="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$MODELS_CONF" 2>/dev/null | tail -1)" || true
+  [[ -z "$line" ]] && return 0
+  line="${line#*=}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  line="${line%\"}"; line="${line#\"}"
+  line="${line%\'}"; line="${line#\'}"
+  printf '%s' "$line"
+}
+
 export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8317}"
 export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-$(cat "$API_KEY_FILE")}"
 
-export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDEX_OPUS_MODEL:-${ANTHROPIC_DEFAULT_OPUS_MODEL:-gpt-5-codex(high)}}"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="${CLAUDEX_SONNET_MODEL:-${ANTHROPIC_DEFAULT_SONNET_MODEL:-gpt-5-codex(medium)}}"
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDEX_HAIKU_MODEL:-${ANTHROPIC_DEFAULT_HAIKU_MODEL:-gpt-5-codex(low)}}"
+# Precedence: CLAUDEX_*_MODEL env override  >  models.conf  >  built-in default.
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${CLAUDEX_OPUS_MODEL:-$(read_slot OPUS)}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${CLAUDEX_SONNET_MODEL:-$(read_slot SONNET)}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${CLAUDEX_HAIKU_MODEL:-$(read_slot HAIKU)}"
+
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-gpt-5-codex(high)}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-gpt-5-codex(medium)}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-gpt-5-codex(low)}"
 
 # Claude Code 1.x compatibility.
 export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-$ANTHROPIC_DEFAULT_SONNET_MODEL}"
 export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-$ANTHROPIC_DEFAULT_HAIKU_MODEL}"
+
+printf '\033[1;34m[claudex]\033[0m Opus:%s  Sonnet:%s  Haiku:%s\n' \
+  "$ANTHROPIC_DEFAULT_OPUS_MODEL" "$ANTHROPIC_DEFAULT_SONNET_MODEL" "$ANTHROPIC_DEFAULT_HAIKU_MODEL" >&2
 
 exec claude "$@"

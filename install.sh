@@ -7,6 +7,7 @@ BIN_DIR="$INSTALL_DIR/bin"
 CONFIG_DIR="${CLIPROXY_CONFIG_DIR:-$HOME/.cli-proxy-api}"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 API_KEY_FILE="$INSTALL_DIR/api-key"
+MODELS_CONF="$INSTALL_DIR/models.conf"
 SHELL_RC=""
 
 log() { printf '\033[1;34m[claudex]\033[0m %s\n' "$*"; }
@@ -71,8 +72,17 @@ write_config() {
   log "Wrote $CONFIG_FILE"
 }
 
+install_models_conf() {
+  if [[ -f "$MODELS_CONF" ]]; then
+    log "Keeping existing models.conf (edit it or run: claudex-models set ...)"
+    return
+  fi
+  cp "$ROOT_DIR/templates/models.conf" "$MODELS_CONF"
+  log "Wrote $MODELS_CONF"
+}
+
 install_wrappers() {
-  for f in claudex claudex-auth claudex-proxy; do
+  for f in claudex claudex-auth claudex-proxy claudex-models; do
     sed "s#__CLAUDEX_INSTALL_DIR__#${INSTALL_DIR}#g; s#__CLIPROXY_CONFIG_FILE__#${CONFIG_FILE}#g" \
       "$ROOT_DIR/bin/$f" > "$BIN_DIR/$f"
     chmod +x "$BIN_DIR/$f"
@@ -106,8 +116,10 @@ EOFRC
 install_cliproxyapi
 make_api_key
 write_config
+install_models_conf
 install_wrappers
 update_shell
 
 log "Done. Open a new shell or run: export PATH=\"$BIN_DIR:\$PATH\""
 log "Next: claudex-auth codex && claudex-proxy start && claudex"
+log "Pick your models interactively: claudex-models set"
