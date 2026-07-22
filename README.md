@@ -19,10 +19,10 @@ Verify your setup at any time with `claudex-doctor`.
 
 ## Quick start
 
-One line, pinned to a released version — clones the repo and runs the verified installer:
+One line, pinned to a released version — clones the repo at that tag and runs the verified installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/v0.1.0/bootstrap.sh | bash
+CLAUDEX_REF=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/v0.1.0/bootstrap.sh)"
 ```
 
 If you have a terminal it drops you straight into the guided setup; otherwise open a new shell and run `claudex-setup`. That wizard handles sign-in, starts the proxy, and lets you pick your models. Then:
@@ -38,7 +38,7 @@ Download the bootstrap, read it, then run it:
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Davshiv20/claudex/v0.1.0/bootstrap.sh
 less bootstrap.sh
-bash bootstrap.sh
+CLAUDEX_REF=v0.1.0 bash bootstrap.sh
 ```
 
 Or clone and install manually — same result:
@@ -58,6 +58,8 @@ Install the latest unreleased `main` (mutable — use a tag for reproducibility)
 ```bash
 CLAUDEX_REF=main bash -c "$(curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/main/bootstrap.sh)"
 ```
+
+(`CLAUDEX_REF` controls which repo ref the bootstrap clones; it defaults to `main`, so pinned installs set it explicitly.)
 
 ### What the wizard does
 

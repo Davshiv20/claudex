@@ -2,11 +2,14 @@
 #
 # claudex bootstrap — one-line installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/main/bootstrap.sh | bash
+# Pinned (recommended):
+#   CLAUDEX_REF=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/v0.1.0/bootstrap.sh)"
+# Bleeding edge:
+#   CLAUDEX_REF=main bash -c "$(curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/main/bootstrap.sh)"
 #
-# This clones the (inspectable) claudex repo, then runs its install.sh, which
-# downloads a pinned, checksum-verified CLIProxyAPI binary. Prefer the manual
-# clone path in the README if you'd rather read the code before running it.
+# This clones the (inspectable) claudex repo at CLAUDEX_REF (default: main), then
+# runs its install.sh, which downloads a pinned, checksum-verified CLIProxyAPI
+# binary. Prefer the manual clone path in the README if you'd rather read first.
 set -euo pipefail
 
 REPO="${CLAUDEX_REPO:-https://github.com/Davshiv20/claudex.git}"
