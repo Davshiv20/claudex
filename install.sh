@@ -303,7 +303,7 @@ install_models_conf() {
 
 install_wrappers() {
   local f
-  for f in claudex claudex-auth claudex-proxy claudex-models claudex-doctor claudex-uninstall claudex-update; do
+  for f in claudex claudex-auth claudex-proxy claudex-models claudex-doctor claudex-uninstall claudex-update claudex-setup; do
     sed "s#__CLAUDEX_INSTALL_DIR__#${INSTALL_DIR}#g; \
          s#__CLIPROXY_CONFIG_FILE__#${CONFIG_FILE}#g; \
          s#__CLIPROXY_CONFIG_DIR__#${CONFIG_DIR}#g; \
@@ -344,7 +344,7 @@ install_models_conf
 install_wrappers
 update_shell
 
-log "Done. Open a new shell or run: export PATH=\"$BIN_DIR:\$PATH\""
-log "Next: claudex-auth codex && claudex-proxy start && claudex"
-log "Pick your models interactively: claudex-models set"
-log "Check your setup any time:       claudex-doctor"
+printf '\n'
+log "claudex installed."
+log "Open a new shell (or run: export PATH=\"$BIN_DIR:\$PATH\")"
+log "Then finish in one guided step:  \033[1mclaudex-setup\033[0m"

@@ -5,7 +5,7 @@ Guided setup for running GPT/Codex (or Gemini) models inside [Claude Code](https
 claudex installs and configures a **local** CLIProxyAPI server, helps you authenticate Codex/Claude, and adds a `claudex` command that launches `claude` pointed at the proxy through Anthropic-compatible environment variables. You keep the Claude Code UX; the models behind it are yours to choose.
 
 > [!NOTE]
-> This is a **guided, minimal setup** — not a single command. You'll install prerequisites, run the installer, authenticate once via OAuth, start the proxy, and pick your models. Each step is one command and is explained below.
+> Onboarding is two moves: install, then `claudex-setup` — a guided wizard that walks you through OAuth, starting the proxy, and picking models. No command memorization required.
 
 ## Prerequisites
 
@@ -13,31 +13,44 @@ claudex installs and configures a **local** CLIProxyAPI server, helps you authen
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed (the `claude` command). claudex wraps it; it does not install it.
 - **`bash`, `curl`, `python3`** (present on macOS and most Linux distros).
 - A **Codex/ChatGPT account** (and/or Claude, Gemini) to authenticate the proxy against.
-- Optional: **[`fzf`](https://github.com/junegunn/fzf)** for fuzzy model selection, **Homebrew** on macOS (used to install CLIProxyAPI when available).
+- Optional: **[`fzf`](https://github.com/junegunn/fzf)** for fuzzy model selection; **git** (required for the one-line bootstrap); **Homebrew** (only if you opt into a system CLIProxyAPI via `CLAUDEX_USE_SYSTEM_CLIPROXY=1`).
 
 Verify your setup at any time with `claudex-doctor`.
 
 ## Quick start
 
+One line — clones the repo and runs the verified installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/main/bootstrap.sh | bash
+```
+
+If you have a terminal, it drops you straight into the guided setup. Otherwise, open a new shell and run:
+
+```bash
+claudex-setup
+```
+
+That's it — `claudex-setup` handles sign-in, starts the proxy, and lets you pick your models. Then launch Claude Code on your models:
+
+```bash
+claudex
+```
+
+### Prefer to read the code first?
+
+Clone and install manually — same result, nothing hidden:
+
 ```bash
 git clone https://github.com/Davshiv20/claudex.git
 cd claudex
 ./install.sh
+claudex-setup   # open a new shell first so claudex-* is on your PATH
 ```
 
-Open a new shell (or `source ~/.zshrc`) so the `claudex` commands are on your `PATH`, then:
+The bootstrap script only clones this repo and runs `install.sh`; it does not pipe any opaque logic into your shell, and the CLIProxyAPI binary is still checksum-verified. Run `claudex-doctor` any time to check your setup.
 
-```bash
-claudex-auth codex          # browser OAuth for OpenAI/Codex
-# optional: also expose Claude OAuth behind the proxy
-claudex-auth claude
-
-claudex-proxy start         # start the local proxy
-claudex-models set          # pick your models (guided)
-claudex                     # launch Claude Code backed by your chosen models
-```
-
-Run `claudex-doctor` if anything looks off.
+Rather run the steps yourself? `claudex-setup` is just: `claudex-auth codex` → `claudex-proxy start` → `claudex-models set`.
 
 ## Choosing your models
 
@@ -168,6 +181,7 @@ claudex-uninstall --yes     # skip the confirmation prompt
 - `~/.claudex/models.conf` (your Opus/Sonnet/Haiku model map)
 - wrapper commands in `~/.claudex/bin`:
   - `claudex` — launch Claude Code with your model map
+  - `claudex-setup` — guided first-run onboarding
   - `claudex-auth` — OAuth login (codex/claude)
   - `claudex-proxy` — start/stop/status/logs/models
   - `claudex-models` — pick/list/show/profile models

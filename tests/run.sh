@@ -98,6 +98,9 @@ section "Static syntax checks (bash -n)"
 bash -n "$REPO_DIR/install.sh"
 assert_success $? "bash -n install.sh"
 
+bash -n "$REPO_DIR/bootstrap.sh"
+assert_success $? "bash -n bootstrap.sh"
+
 for f in "$REPO_DIR"/bin/*; do
   [[ -f "$f" ]] || continue
   bash -n "$f"
@@ -112,7 +115,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   #   SC1087 — false positive in bin/claudex-doctor, where "$slot[[:space:]]*="
   #            is a grep regex string, not a bash array index expansion.
   shellcheck --severity=warning --exclude=SC1087 --shell=bash \
-    "$REPO_DIR/install.sh" "$REPO_DIR"/bin/*
+    "$REPO_DIR/install.sh" "$REPO_DIR/bootstrap.sh" "$REPO_DIR"/bin/*
   st=$?
   assert_success "$st" "shellcheck (severity=warning, exclude SC1087) on install.sh + bin/*"
 else
@@ -217,7 +220,7 @@ echo "stub cli-proxy-api $*"
 STUB
 chmod +x "$INST_DIR/bin/cli-proxy-api"
 
-WRAPPERS="claudex claudex-auth claudex-proxy claudex-models claudex-doctor claudex-uninstall claudex-update"
+WRAPPERS="claudex claudex-auth claudex-proxy claudex-models claudex-doctor claudex-uninstall claudex-update claudex-setup"
 
 run_install() {
   # All state is redirected into the sandbox via env vars; the real $HOME is
@@ -349,6 +352,25 @@ mkdir -p "$UHOME/.claudex2"
 out_u5="$(printf '' | HOME="$UHOME" "$u5" 2>&1)"; st_u5=$?
 assert_fail "$st_u5" "uninstall without --yes and no tty refuses"
 assert_contains "$out_u5" "without confirmation" "refusal points to --yes"
+
+# ===========================================================================
+# 6. Guided setup wizard (non-tty fallback)
+# ===========================================================================
+section "Guided setup (non-interactive fallback)"
+
+SETUP_DIR="$TMPROOT/setup"
+mkdir -p "$SETUP_DIR"
+SW="$SETUP_DIR/claudex-setup"
+sed -e "s#__CLAUDEX_INSTALL_DIR__#${SETUP_DIR}#g" \
+    -e "s#__CLIPROXY_CONFIG_DIR__#${SETUP_DIR}/cfg#g" \
+    "$REPO_DIR/bin/claudex-setup" > "$SW"
+chmod +x "$SW"
+
+# In a captured (non-tty) context, claudex-setup must NOT block on prompts; it
+# should print the manual steps and exit 0.
+out_sw="$("$SW" 2>&1)"; st_sw=$?
+assert_success "$st_sw" "claudex-setup exits 0 without a terminal"
+assert_contains "$out_sw" "claudex-auth codex" "non-tty setup prints manual next steps"
 
 # ===========================================================================
 # Summary

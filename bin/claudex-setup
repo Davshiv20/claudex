@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+INSTALL_DIR="__CLAUDEX_INSTALL_DIR__"
+CONFIG_DIR="__CLIPROXY_CONFIG_DIR__"
+BIN_DIR="$INSTALL_DIR/bin"
+API_KEY_FILE="$INSTALL_DIR/api-key"
+BASE_URL="${ANTHROPIC_BASE_URL:-http://127.0.0.1:8317}"
+
+b()    { printf '\033[1;34m%s\033[0m\n' "$*"; }
+ok()   { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[1;33m!\033[0m %s\n' "$*"; }
+step() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
+
+# Yes/no prompt (default yes). Reads the terminal, not stdin, so it works even
+# when this script was piped in (curl | bash bootstrap).
+ask() {
+  local reply
+  printf '  %s [Y/n]: ' "$1"
+  read -r reply </dev/tty || reply=""
+  case "$reply" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
+}
+
+proxy_reachable() {
+  [[ -f "$API_KEY_FILE" ]] || return 1
+  local key; key="$(cat "$API_KEY_FILE")"
+  curl --connect-timeout 5 --max-time 15 -fsS "$BASE_URL/v1/models" \
+    -H "Authorization: Bearer $key" >/dev/null 2>&1
+}
+
+has_auth() {
+  [[ -d "$CONFIG_DIR" ]] && find "$CONFIG_DIR" -maxdepth 2 -type f -name '*.json' 2>/dev/null | grep -q .
+}
+
+b "claudex setup"
+echo "Let's get you running Claude Code on your own models."
+
+# No terminal to prompt on (CI, piped without tty): print the manual steps.
+if ! { [ -r /dev/tty ] && [ -t 1 ]; }; then
+  cat <<EOF
+
+Run these to finish:
+  claudex-auth codex     # sign in (opens a browser)
+  claudex-proxy start    # start the local proxy
+  claudex-models set     # pick your models
+  claudex                # launch Claude Code
+EOF
+  exit 0
+fi
+
+# 1. Claude Code present?
+step "Checking Claude Code"
+if command -v claude >/dev/null 2>&1; then
+  ok "claude found"
+else
+  warn "Claude Code (claude) is not installed."
+  echo "  Install it: https://docs.anthropic.com/en/docs/claude-code"
+  ask "Continue setup anyway?" || { echo "Come back and run claudex-setup after installing Claude Code."; exit 0; }
+fi
+
+# 2. Authentication
+step "Authentication"
+if has_auth; then
+  ok "Already authenticated (tokens in $CONFIG_DIR)"
+  if ask "Re-authenticate with Codex?"; then
+    "$BIN_DIR/claudex-auth" codex || warn "Auth did not complete."
+  fi
+else
+  if ask "Sign in with Codex now (opens a browser)?"; then
+    "$BIN_DIR/claudex-auth" codex || warn "Auth did not complete — re-run: claudex-auth codex"
+  else
+    warn "Skipped. You'll need to run: claudex-auth codex"
+  fi
+fi
+
+# 3. Proxy
+step "Local proxy"
+if proxy_reachable; then
+  ok "Proxy already running at $BASE_URL"
+else
+  if ask "Start the local proxy now?"; then
+    "$BIN_DIR/claudex-proxy" start || warn "Could not start the proxy — see: claudex-proxy logs"
+  else
+    warn "Skipped. Start it later with: claudex-proxy start"
+  fi
+fi
+
+# 4. Models
+step "Model selection"
+if proxy_reachable; then
+  if ask "Pick your models now?"; then
+    "$BIN_DIR/claudex-models" set || warn "Model picker didn't finish — re-run: claudex-models set"
+  else
+    warn "Skipped. Choose later with: claudex-models set"
+  fi
+else
+  warn "Proxy isn't reachable yet, so skipping model selection."
+  echo "  Once the proxy is up: claudex-models set"
+fi
+
+# 5. Health check
+step "Health check"
+"$BIN_DIR/claudex-doctor" || true
+
+printf '\n'
+b "You're ready. Launch Claude Code with:  claudex"
