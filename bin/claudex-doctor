@@ -33,7 +33,9 @@ check_perm() {
   local f="$1" want="600"
   if [[ ! -e "$f" ]]; then bad "missing: $f"; return; fi
   local mode
-  mode="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null)"
+  # GNU stat first (Linux); fall back to BSD stat (macOS). Order matters:
+  # GNU `stat -f` is a valid but different flag, so BSD-first would misfire on Linux.
+  mode="$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null)"
   if [[ "$mode" == "$want" ]]; then ok "$f ($mode)"; else warn "$f has mode $mode (expected $want)"; fi
 }
 check_perm "$API_KEY_FILE"

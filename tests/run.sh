@@ -83,8 +83,9 @@ assert_fail() {
 }
 
 # --- misc helpers ----------------------------------------------------------
-# Portable "octal permission bits" lookup (BSD stat vs GNU stat).
-file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null; }
+# Portable "octal permission bits" lookup. GNU stat first (Linux), then BSD (macOS):
+# GNU `stat -f` is a valid but different flag, so BSD-first misfires on Linux.
+file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
 
 # Stable content fingerprint of a file (used to prove "unchanged").
 filesum() { cksum < "$1" 2>/dev/null; }
