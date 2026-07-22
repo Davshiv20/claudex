@@ -6,28 +6,80 @@ CONFIG_DIR="__CLIPROXY_CONFIG_DIR__"
 BIN_DIR="$INSTALL_DIR/bin"
 
 PURGE=0
+ASSUME_YES=0
 for arg in "$@"; do
   case "$arg" in
     --purge|--all) PURGE=1 ;;
+    -y|--yes) ASSUME_YES=1 ;;
     -h|--help)
       cat <<'USAGE'
-Usage: claudex-uninstall [--purge]
+Usage: claudex-uninstall [--purge] [--yes]
 
 Removes the claudex wrappers, config, and PATH/alias lines.
 
   (default)   Keeps your CLIProxyAPI auth/config dir so re-installing is painless.
   --purge     Also delete the CLIProxyAPI config dir, including OAuth tokens.
+  --yes, -y   Do not prompt for confirmation.
 USAGE
       exit 0 ;;
     *) echo "Unknown option: $arg (see --help)" >&2; exit 1 ;;
   esac
 done
 
+# Refuse to rm -rf anything that isn't a plausible claudex-owned directory.
+# Guards against a mis-set CLAUDEX_INSTALL_DIR / CLIPROXY_CONFIG_DIR wiping $HOME etc.
+assert_safe_dir() {
+  local d="$1" label="$2"
+  [[ -n "$d" ]] || { echo "Refusing to remove $label: empty path." >&2; exit 1; }
+  case "$d" in
+    /*) ;;
+    *) echo "Refusing to remove $label: '$d' is not an absolute path." >&2; exit 1 ;;
+  esac
+  case "$d" in
+    /|/root|/home|/Users|"$HOME") echo "Refusing to remove $label: '$d' is too dangerous." >&2; exit 1 ;;
+  esac
+  # Reject any directory that is an ancestor of $HOME (e.g. /Users, /home/foo/..).
+  case "$HOME/" in
+    "$d"/*) echo "Refusing to remove $label: '$d' contains your home directory." >&2; exit 1 ;;
+  esac
+  # Require a reasonable depth so top-level system dirs (/usr, /etc, /var) are rejected.
+  local trimmed="${d#/}"
+  case "$trimmed" in
+    */*) ;;
+    *) echo "Refusing to remove $label: '$d' is a top-level directory." >&2; exit 1 ;;
+  esac
+}
+
+assert_safe_dir "$INSTALL_DIR" "the claudex install dir"
+[[ "$PURGE" -eq 1 ]] && assert_safe_dir "$CONFIG_DIR" "the CLIProxyAPI config dir"
+
+echo "This will remove:"
+echo "  - $INSTALL_DIR  (wrappers, api-key, models.conf)"
+echo "  - PATH/alias lines in your shell rc files"
+if [[ "$PURGE" -eq 1 ]]; then
+  echo "  - $CONFIG_DIR  (CLIProxyAPI config AND OAuth tokens)"
+else
+  echo "  (keeping $CONFIG_DIR — pass --purge to remove it too)"
+fi
+
+if [[ "$ASSUME_YES" -ne 1 ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "Refusing to proceed without confirmation. Re-run with --yes." >&2
+    exit 1
+  fi
+  printf 'Proceed? [y/N]: '
+  read -r reply </dev/tty || reply=""
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) echo "Aborted."; exit 0 ;;
+  esac
+fi
+
 echo "Uninstalling claudex..."
 
 # Stop the proxy if our wrapper is still around.
 if [[ -x "$BIN_DIR/claudex-proxy" ]]; then
-  "$BIN_DIR/claudex-proxy" stop >/dev/null 2>&1 || true
+  "$BIN_DIR/claudex-proxy" stop --force >/dev/null 2>&1 || true
 fi
 
 # Remove shell rc lines we added (PATH snippet + alias).
@@ -35,7 +87,7 @@ for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
   [[ -f "$rc" ]] || continue
   if grep -q 'CLAUDEX PATH\|CLAUDEX ALIAS' "$rc" 2>/dev/null; then
     tmp="$(mktemp)"
-    RC="$rc" BIN_DIR="$BIN_DIR" python3 - "$rc" > "$tmp" <<'PY'
+    BIN_DIR="$BIN_DIR" python3 - "$rc" > "$tmp" <<'PY'
 import os, sys
 bin_dir = os.environ["BIN_DIR"]
 with open(sys.argv[1]) as f:

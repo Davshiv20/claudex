@@ -44,6 +44,9 @@ Environment:
   CLAUDEX_CLIPROXY_VERSION=latest   Newest release that is >= the minimum age.
   CLAUDEX_MIN_RELEASE_AGE_DAYS=N    Refuse releases younger than N days (default: 7).
                                     Set 0 to disable the age gate.
+  CLAUDEX_SKIP_RELEASE_AGE_CHECK=1  Bypass the age gate (which otherwise fails closed).
+  CLAUDEX_USE_SYSTEM_CLIPROXY=1     Use an existing system/Homebrew CLIProxyAPI
+                                    (NOT version-pinned or checksum-verified).
   CLAUDEX_SKIP_CHECKSUM=1           Skip SHA256 verification (NOT recommended).
   CLAUDEX_INSTALL_DIR=DIR           Where claudex lives (default: ~/.claudex).
   CLIPROXY_CONFIG_DIR=DIR           CLIProxyAPI config/auth dir (default: ~/.cli-proxy-api).
@@ -63,6 +66,20 @@ mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CONFIG_DIR/logs"
 
 CURL=(curl --connect-timeout 10 --max-time 120 -fsSL)
 RELEASES_API="https://api.github.com/repos/router-for-me/CLIProxyAPI/releases"
+
+# SHA256 of the VOUCHED release's assets, embedded in this repo so the pinned
+# version is verified against a value we control — NOT one fetched from the same
+# (possibly mutated) release. If you bump VOUCHED_CLIPROXY_VERSION, update these
+# too or the install will fail closed on a mismatch.
+embedded_sha256() {
+  case "$1" in
+    darwin_aarch64) echo "3ebffcf346c79925ff393225c2769a509a2297dcc1b8154c49235cb1d80a69ac" ;;
+    darwin_amd64)   echo "1fa5b1324c43fada01234559f382ba0878681292f6d653056aef9ff99ccc7b86" ;;
+    linux_aarch64)  echo "fc9d27799c97950614e98f191c3a6fea5c1b61bd390c44d2977090678b1c5794" ;;
+    linux_amd64)    echo "3ca18073c87a7d21391dcc437558c37ee9b98ce1eb1cd2c013e064a236664322" ;;
+    *) echo "" ;;
+  esac
+}
 
 # Age (in whole days) of a release tag, printed to stdout. Non-zero on failure.
 release_age_days() {
@@ -132,34 +149,45 @@ resolve_version() {
 
   CLIPROXY_VERSION="$requested"
   if [[ "$MIN_RELEASE_AGE_DAYS" -gt 0 && "$CLIPROXY_VERSION" != "$VOUCHED_CLIPROXY_VERSION" ]]; then
-    local age
-    if age="$(release_age_days "$CLIPROXY_VERSION")"; then
-      if (( age < MIN_RELEASE_AGE_DAYS )); then
-        die "CLIProxyAPI $CLIPROXY_VERSION is only ${age} day(s) old (minimum ${MIN_RELEASE_AGE_DAYS}). Fresh releases are held back for safety. Override with CLAUDEX_MIN_RELEASE_AGE_DAYS=0 if you're sure."
-      fi
-      log "$CLIPROXY_VERSION is ${age} day(s) old (>= ${MIN_RELEASE_AGE_DAYS}) — OK"
-    else
-      warn "Could not verify release age for $CLIPROXY_VERSION (network?). Proceeding because you pinned it explicitly."
+    if [[ "${CLAUDEX_SKIP_RELEASE_AGE_CHECK:-0}" == "1" ]]; then
+      warn "Skipping release-age check (CLAUDEX_SKIP_RELEASE_AGE_CHECK=1)"
+      return
     fi
+    # Fail closed: if we cannot prove the release is old enough, do not install it.
+    local age
+    age="$(release_age_days "$CLIPROXY_VERSION")" \
+      || die "Could not verify release age for $CLIPROXY_VERSION (network down or unknown tag). The age policy fails closed. Override with CLAUDEX_SKIP_RELEASE_AGE_CHECK=1 if you're sure."
+    if (( age < MIN_RELEASE_AGE_DAYS )); then
+      die "CLIProxyAPI $CLIPROXY_VERSION is only ${age} day(s) old (minimum ${MIN_RELEASE_AGE_DAYS}). Fresh releases are held back for safety. Override with CLAUDEX_MIN_RELEASE_AGE_DAYS=0 or CLAUDEX_SKIP_RELEASE_AGE_CHECK=1 if you're sure."
+    fi
+    log "$CLIPROXY_VERSION is ${age} day(s) old (>= ${MIN_RELEASE_AGE_DAYS}) — OK"
   fi
 }
 
 install_cliproxyapi() {
-  if [[ "${CLAUDEX_FORCE_CLIPROXY:-0}" != "1" ]]; then
-    if command -v cliproxyapi >/dev/null 2>&1 || command -v cli-proxy-api >/dev/null 2>&1 \
-       || [[ -x "$BIN_DIR/cli-proxy-api" ]]; then
-      log "CLIProxyAPI already installed"
-      return
-    fi
+  # Prefer the binary we downloaded and checksum-verified ourselves.
+  if [[ "${CLAUDEX_FORCE_CLIPROXY:-0}" != "1" && -x "$BIN_DIR/cli-proxy-api" ]]; then
+    log "Using verified CLIProxyAPI at $BIN_DIR/cli-proxy-api"
+    return
   fi
 
-  if command -v brew >/dev/null 2>&1; then
-    log "Installing CLIProxyAPI with Homebrew"
-    brew tap router-for-me/tap >/dev/null 2>&1 || true
-    if brew install cliproxyapi; then
+  # Opt in to an existing system/Homebrew binary. This is NOT version-pinned or
+  # checksum-verified, so it is off by default.
+  if [[ "${CLAUDEX_USE_SYSTEM_CLIPROXY:-0}" == "1" ]]; then
+    if command -v cliproxyapi >/dev/null 2>&1 || command -v cli-proxy-api >/dev/null 2>&1; then
+      warn "Using existing system CLIProxyAPI (CLAUDEX_USE_SYSTEM_CLIPROXY=1) — not version-pinned or checksum-verified"
       return
     fi
-    warn "Homebrew install failed; falling back to pinned GitHub release binary"
+    if command -v brew >/dev/null 2>&1; then
+      warn "Installing CLIProxyAPI via Homebrew (CLAUDEX_USE_SYSTEM_CLIPROXY=1) — not version-pinned or checksum-verified"
+      brew tap router-for-me/tap >/dev/null 2>&1 || true
+      if brew install cliproxyapi; then
+        return
+      fi
+      warn "Homebrew install failed; falling back to the verified pinned binary"
+    else
+      warn "No system CLIProxyAPI found; falling back to the verified pinned binary"
+    fi
   fi
 
   resolve_version
@@ -189,12 +217,21 @@ install_cliproxyapi() {
     warn "Skipping checksum verification (CLAUDEX_SKIP_CHECKSUM=1)"
   else
     log "Verifying SHA256 checksum"
-    if ! "${CURL[@]}" "$base/checksums.txt" -o "$tmp/checksums.txt"; then
-      die "Could not fetch checksums.txt for ${CLIPROXY_VERSION}. Re-run with CLAUDEX_SKIP_CHECKSUM=1 to bypass (not recommended)."
+    local expected=""
+    if [[ "$CLIPROXY_VERSION" == "$VOUCHED_CLIPROXY_VERSION" ]]; then
+      expected="$(embedded_sha256 "$plat")"
+      [[ -n "$expected" ]] && log "Using SHA256 embedded in this repo"
     fi
-    local expected
-    expected="$(grep " ${asset}\$" "$tmp/checksums.txt" | awk '{print $1}' | head -1)"
-    [[ -n "$expected" ]] || die "No checksum entry for $asset in checksums.txt."
+    if [[ -z "$expected" ]]; then
+      # Non-vouched version: best-effort against the release's own checksums.txt.
+      # This guards against corrupted downloads, not a mutated/compromised release.
+      if ! "${CURL[@]}" "$base/checksums.txt" -o "$tmp/checksums.txt"; then
+        die "Could not fetch checksums.txt for ${CLIPROXY_VERSION}. Re-run with CLAUDEX_SKIP_CHECKSUM=1 to bypass (not recommended)."
+      fi
+      expected="$(grep " ${asset}\$" "$tmp/checksums.txt" | awk '{print $1}' | head -1)"
+      [[ -n "$expected" ]] || die "No checksum entry for $asset in checksums.txt."
+      warn "Verifying against checksums.txt from the same release (best-effort; not an independent signature)"
+    fi
     local actual
     if command -v shasum >/dev/null 2>&1; then
       actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"

@@ -16,9 +16,9 @@ USAGE
 CONFIG_DIR="__CLIPROXY_CONFIG_DIR__"
 
 cliproxy_bin() {
-  if command -v cliproxyapi >/dev/null 2>&1; then echo cliproxyapi; return; fi
-  if command -v cli-proxy-api >/dev/null 2>&1; then echo cli-proxy-api; return; fi
   if [[ -x "__CLAUDEX_INSTALL_DIR__/bin/cli-proxy-api" ]]; then echo "__CLAUDEX_INSTALL_DIR__/bin/cli-proxy-api"; return; fi
+  if command -v cliproxyapi >/dev/null 2>&1; then command -v cliproxyapi; return; fi
+  if command -v cli-proxy-api >/dev/null 2>&1; then command -v cli-proxy-api; return; fi
   echo "CLIProxyAPI not found. Run install.sh first." >&2
   exit 1
 }

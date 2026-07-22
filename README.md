@@ -130,33 +130,39 @@ flowchart LR
 
 ## Security & supply chain
 
-- **Pinned + verified binary.** The installer downloads a specific, reviewed CLIProxyAPI version and verifies its **SHA256** against the release `checksums.txt`. A mismatch aborts the install.
-- **Minimum release age.** Any version other than the vouched pin (including `CLAUDEX_CLIPROXY_VERSION=latest`) must be at least **7 days old**, so brand-new releases are given time to be caught before they're installed. Tune with `CLAUDEX_MIN_RELEASE_AGE_DAYS` (set `0` to disable).
+- **Verified binary by default.** The installer downloads the vouched, pinned CLIProxyAPI version and verifies its **SHA256 against a hash embedded in this repo** (not one fetched from the same release), then keeps it at `~/.claudex/bin/cli-proxy-api`. A mismatch aborts the install. This verified binary is preferred by all claudex commands at runtime.
+- **System binary is opt-in.** claudex will **not** silently use a `cliproxyapi`/`cli-proxy-api` already on your `PATH` or a Homebrew install, because those are not version-pinned or checksum-verified. Opt in explicitly with `CLAUDEX_USE_SYSTEM_CLIPROXY=1` (you'll get a warning).
+- **Checksums.** The pinned version is verified against the in-repo hash. For any *other* version (including `latest`), verification is best-effort against that release's own `checksums.txt` — this catches corrupted downloads but is not an independent signature.
+- **Minimum release age (fail-closed).** Any version other than the vouched pin (including `latest`) must be at least **7 days old**. If claudex can't prove the age (e.g. network down or unknown tag), it **refuses** rather than proceeding. Tune with `CLAUDEX_MIN_RELEASE_AGE_DAYS` (set `0` to disable), or bypass with `CLAUDEX_SKIP_RELEASE_AGE_CHECK=1`.
 - **Private secrets.** The installer runs with `umask 077` and writes `api-key` and `config.yaml` atomically at mode `0600` — they are never briefly world-readable.
 - **Non-destructive config.** An existing `~/.cli-proxy-api/config.yaml` is **preserved**; pass `--reset` to overwrite (a timestamped backup is kept either way).
-- **Safe process control.** `claudex-proxy stop` only kills a PID that is actually a `cli-proxy-api` process, and clears stale PID files, so it won't kill an unrelated process.
+- **Safe process control.** `claudex-proxy stop` only kills a PID whose command references *our* config file and whose executable is a cli-proxy-api binary, waits for it to actually exit (`--force` escalates to SIGKILL), and clears stale PID files — so it won't kill or falsely claim to stop an unrelated process.
+- **Guarded uninstall.** `claudex-uninstall` refuses to `rm -rf` dangerous paths (`/`, `$HOME`, ancestors of home, top-level dirs) and requires confirmation (or `--yes`), so a mis-set `CLAUDEX_INSTALL_DIR` can't wipe your home directory.
 
 Install options:
 
 ```bash
-./install.sh --reset                              # overwrite existing CLIProxy config
-CLAUDEX_CLIPROXY_VERSION=v7.2.93 ./install.sh      # pin a specific version
-CLAUDEX_CLIPROXY_VERSION=latest ./install.sh       # newest release >= min age
-CLAUDEX_MIN_RELEASE_AGE_DAYS=14 ./install.sh       # stricter soak period
+./install.sh --reset                               # overwrite existing CLIProxy config
+CLAUDEX_CLIPROXY_VERSION=v7.2.93 ./install.sh       # pin a specific version
+CLAUDEX_CLIPROXY_VERSION=latest ./install.sh        # newest release >= min age
+CLAUDEX_MIN_RELEASE_AGE_DAYS=14 ./install.sh        # stricter soak period
+CLAUDEX_USE_SYSTEM_CLIPROXY=1 ./install.sh          # use system/Homebrew binary (unverified)
 ```
 
 ## Maintenance
 
 ```bash
-claudex-doctor       # health check: deps, perms, auth, proxy, model map
-claudex-update       # pull latest repo + refresh CLIProxyAPI and wrappers
-claudex-uninstall    # remove wrappers, config, PATH/alias (keeps OAuth tokens)
+claudex-doctor              # health check: deps, perms, auth, proxy, model map
+claudex-update              # pull latest repo + refresh CLIProxyAPI and wrappers
+claudex-proxy stop --force  # force-stop the proxy if it won't exit cleanly
+claudex-uninstall           # remove wrappers, config, PATH/alias (keeps OAuth tokens)
 claudex-uninstall --purge   # also delete ~/.cli-proxy-api (OAuth tokens included)
+claudex-uninstall --yes     # skip the confirmation prompt
 ```
 
 ## What gets installed
 
-- CLIProxyAPI binary (Homebrew formula if available, otherwise a pinned, checksum-verified release binary)
+- CLIProxyAPI binary (pinned, checksum-verified release binary at `~/.claudex/bin/cli-proxy-api`; system/Homebrew binary only with `CLAUDEX_USE_SYSTEM_CLIPROXY=1`)
 - `~/.cli-proxy-api/config.yaml` and `~/.cli-proxy-api/` for OAuth tokens/logs
 - `~/.claudex/api-key` (local proxy auth token, mode `0600`)
 - `~/.claudex/models.conf` (your Opus/Sonnet/Haiku model map)

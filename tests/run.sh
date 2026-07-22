@@ -207,15 +207,15 @@ FAKE_HOME="$SBOX/home"
 INST_DIR="$SBOX/claudex"
 CFG_DIR="$SBOX/cliproxy"
 FAKE_BIN="$SBOX/fakebin"
-mkdir -p "$FAKE_HOME" "$FAKE_BIN"
+mkdir -p "$FAKE_HOME" "$FAKE_BIN" "$INST_DIR/bin"
 
-# A stub `cli-proxy-api` on PATH makes install.sh's `command -v cli-proxy-api`
-# short-circuit the download entirely — no network, no brew, no release fetch.
-cat > "$FAKE_BIN/cli-proxy-api" <<'STUB'
+# Pre-place a stub at the VERIFIED binary location ($INSTALL_DIR/bin) so install.sh
+# reuses it and skips the download entirely — no network, no brew, no release fetch.
+cat > "$INST_DIR/bin/cli-proxy-api" <<'STUB'
 #!/usr/bin/env bash
 echo "stub cli-proxy-api $*"
 STUB
-chmod +x "$FAKE_BIN/cli-proxy-api"
+chmod +x "$INST_DIR/bin/cli-proxy-api"
 
 WRAPPERS="claudex claudex-auth claudex-proxy claudex-models claudex-doctor claudex-uninstall claudex-update"
 
@@ -233,7 +233,7 @@ run_install() {
 # --- first run ---
 out1="$(run_install 2>&1)"; st1=$?
 assert_success "$st1" "install.sh first run exits 0"
-assert_contains "$out1" "already installed" "first run detected the stubbed binary (no download)"
+assert_contains "$out1" "Using verified CLIProxyAPI" "first run reused the verified binary (no download)"
 
 # api-key created, mode 600
 if [[ -f "$INST_DIR/api-key" ]]; then
@@ -299,6 +299,56 @@ if find "$CFG_DIR" -maxdepth 1 -name 'config.yaml.backup.*' 2>/dev/null | grep -
 else
   fail "--reset left a config.yaml.backup.* file"
 fi
+
+# ===========================================================================
+# 5. Uninstall safety guard (refuses dangerous dirs)
+# ===========================================================================
+section "Uninstall safety guard"
+
+USB="$TMPROOT/uninstall"
+UHOME="$USB/home"
+mkdir -p "$UHOME"
+
+# Render claudex-uninstall with specific INSTALL_DIR/CONFIG_DIR values baked in.
+render_uninstall() {
+  local dst="$USB/claudex-uninstall.$RANDOM"
+  sed -e "s#__CLAUDEX_INSTALL_DIR__#$1#g" -e "s#__CLIPROXY_CONFIG_DIR__#$2#g" \
+      "$REPO_DIR/bin/claudex-uninstall" > "$dst"
+  chmod +x "$dst"
+  printf '%s' "$dst"
+}
+
+# INSTALL_DIR == $HOME must be refused (sandboxed HOME so a bug can't harm us).
+u1="$(render_uninstall "$UHOME" "$UHOME/cfg")"
+out_u1="$(HOME="$UHOME" "$u1" --yes 2>&1)"; st_u1=$?
+assert_fail "$st_u1" "uninstall refuses INSTALL_DIR == \$HOME"
+assert_contains "$out_u1" "too dangerous" "refusal explains the danger"
+
+# A top-level directory must be refused.
+u2="$(render_uninstall "/usr" "/usr")"
+HOME="$UHOME" "$u2" --yes >/dev/null 2>&1; st_u2=$?
+assert_fail "$st_u2" "uninstall refuses a top-level dir (/usr)"
+
+# An ancestor of $HOME must be refused.
+u3="$(render_uninstall "$USB" "$USB")"
+HOME="$UHOME" "$u3" --yes >/dev/null 2>&1; st_u3=$?
+assert_fail "$st_u3" "uninstall refuses an ancestor of \$HOME"
+
+# A genuine claudex-owned dir under a sandbox HOME is allowed and removed.
+SAFE="$UHOME/.claudex"
+mkdir -p "$SAFE/bin"
+printf 'x\n' > "$SAFE/api-key"
+u4="$(render_uninstall "$SAFE" "$UHOME/.cli-proxy-api")"
+HOME="$UHOME" "$u4" --yes >/dev/null 2>&1; st_u4=$?
+assert_success "$st_u4" "uninstall proceeds for a safe claudex dir"
+if [[ ! -d "$SAFE" ]]; then pass "safe dir actually removed"; else fail "safe dir actually removed"; fi
+
+# Non-interactive without --yes must refuse (no accidental removal in pipelines).
+u5="$(render_uninstall "$UHOME/.claudex2" "$UHOME/.cli-proxy-api")"
+mkdir -p "$UHOME/.claudex2"
+out_u5="$(printf '' | HOME="$UHOME" "$u5" 2>&1)"; st_u5=$?
+assert_fail "$st_u5" "uninstall without --yes and no tty refuses"
+assert_contains "$out_u5" "without confirmation" "refusal points to --yes"
 
 # ===========================================================================
 # Summary

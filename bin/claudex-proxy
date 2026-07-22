@@ -9,26 +9,43 @@ PID_FILE="$CONFIG_DIR/claudex-proxy.pid"
 API_KEY_FILE="$INSTALL_DIR/api-key"
 BASE_URL="http://127.0.0.1:8317"
 
+# Prefer the binary we installed and verified; fall back to a system one.
 cliproxy_bin() {
-  if command -v cliproxyapi >/dev/null 2>&1; then echo cliproxyapi; return; fi
-  if command -v cli-proxy-api >/dev/null 2>&1; then echo cli-proxy-api; return; fi
   if [[ -x "$INSTALL_DIR/bin/cli-proxy-api" ]]; then echo "$INSTALL_DIR/bin/cli-proxy-api"; return; fi
+  if command -v cliproxyapi >/dev/null 2>&1; then command -v cliproxyapi; return; fi
+  if command -v cli-proxy-api >/dev/null 2>&1; then command -v cli-proxy-api; return; fi
   echo "CLIProxyAPI not found. Run install.sh first." >&2
   exit 1
 }
 
-# True only if the PID file points at a live process that is actually a
-# cli-proxy-api process (guards against stale/reused PIDs killing something else).
+# True only if the PID file points at a live process that is genuinely OUR proxy.
+# We match on our unique config-file path (not a generic "cli-proxy-api" substring,
+# which is spoofable) and, where possible, confirm the executable identity.
 is_running() {
   [[ -f "$PID_FILE" ]] || return 1
   local pid
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
+
   local cmd
   cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+  # Must be running against our specific config file.
   case "$cmd" in
+    *"$CONFIG_FILE"*) ;;
+    *) return 1 ;;
+  esac
+
+  # Confirm the executable really is a cli-proxy-api binary.
+  local exe=""
+  if [[ -r "/proc/$pid/exe" ]]; then
+    exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"   # Linux
+  else
+    exe="$(ps -o comm= -p "$pid" 2>/dev/null || true)"          # macOS/BSD
+  fi
+  case "$exe" in
     *cli-proxy-api*|*cliproxyapi*) return 0 ;;
+    "") return 0 ;;   # couldn't determine exe; config-path match already held
     *) return 1 ;;
   esac
 }
@@ -37,6 +54,17 @@ clear_stale_pid() {
   if [[ -f "$PID_FILE" ]] && ! is_running; then
     rm -f "$PID_FILE"
   fi
+}
+
+# Wait up to ~5s for a pid to exit. Returns 0 if it exited.
+wait_for_exit() {
+  local pid="$1" waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    [[ "$waited" -ge 50 ]] && return 1
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 0
 }
 
 case "${1:-status}" in
@@ -58,17 +86,29 @@ case "${1:-status}" in
     fi
     ;;
   stop)
-    if is_running; then
-      kill "$(cat "$PID_FILE")"
-      rm -f "$PID_FILE"
-      echo "Stopped CLIProxyAPI"
-    else
+    if ! is_running; then
       clear_stale_pid
       echo "CLIProxyAPI is not running"
+      exit 0
     fi
+    pid="$(cat "$PID_FILE")"
+    kill "$pid" 2>/dev/null || true
+    if ! wait_for_exit "$pid"; then
+      if [[ "${2:-}" == "--force" ]]; then
+        echo "Process did not exit; sending SIGKILL"
+        kill -9 "$pid" 2>/dev/null || true
+        wait_for_exit "$pid" || true
+      fi
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Failed to stop CLIProxyAPI (pid $pid still running). Try: claudex-proxy stop --force" >&2
+      exit 1
+    fi
+    rm -f "$PID_FILE"
+    echo "Stopped CLIProxyAPI"
     ;;
   restart)
-    "$0" stop || true
+    "$0" stop "${2:-}" || true
     "$0" start
     ;;
   status)
@@ -88,7 +128,7 @@ case "${1:-status}" in
       -H "Authorization: Bearer $key" | python3 -m json.tool
     ;;
   *)
-    echo "Usage: claudex-proxy <start|stop|restart|status|logs|models>" >&2
+    echo "Usage: claudex-proxy <start|stop [--force]|restart|status|logs|models>" >&2
     exit 1
     ;;
 esac
