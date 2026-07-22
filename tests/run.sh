@@ -303,6 +303,43 @@ else
   fail "--reset left a config.yaml.backup.* file"
 fi
 
+# --- install.sh --setup launches the wizard (non-tty falls back to manual steps) ---
+out_setup="$(run_install --setup 2>&1)"; st_setup=$?
+assert_success "$st_setup" "install.sh --setup exits 0"
+assert_contains "$out_setup" "claudex setup" "--setup launched the guided wizard"
+assert_contains "$out_setup" "claudex-auth codex" "wizard printed manual steps (non-tty)"
+
+# ===========================================================================
+# 4b. Installer templating is safe on paths with special characters
+# ===========================================================================
+section "Templating robustness (special-char paths)"
+
+WEIRD_BASE="$TMPROOT/w#e&i rd"
+WEIRD_INST="$WEIRD_BASE/claudex"
+WEIRD_CFG="$WEIRD_BASE/cfg"
+mkdir -p "$WEIRD_INST/bin" "$WEIRD_CFG"
+cat > "$WEIRD_INST/bin/cli-proxy-api" <<'STUB'
+#!/usr/bin/env bash
+echo "stub cli-proxy-api $*"
+STUB
+chmod +x "$WEIRD_INST/bin/cli-proxy-api"
+
+env HOME="$FAKE_HOME" \
+    SHELL=/bin/bash \
+    CLAUDEX_INSTALL_DIR="$WEIRD_INST" \
+    CLIPROXY_CONFIG_DIR="$WEIRD_CFG" \
+    PATH="$FAKE_BIN:$PATH" \
+    bash "$REPO_DIR/install.sh" >/dev/null 2>&1
+st_weird=$?
+assert_success "$st_weird" "install into a path containing # & and a space"
+if [[ -f "$WEIRD_INST/bin/claudex-proxy" ]]; then
+  wtxt="$(cat "$WEIRD_INST/bin/claudex-proxy")"
+  assert_contains "$wtxt" "$WEIRD_INST" "wrapper contains the literal special-char path"
+  assert_not_contains "$wtxt" "__CLAUDEX_INSTALL_DIR__" "no leftover placeholder with special-char path"
+else
+  fail "wrapper rendered for special-char install dir"
+fi
+
 # ===========================================================================
 # 5. Uninstall safety guard (refuses dangerous dirs)
 # ===========================================================================

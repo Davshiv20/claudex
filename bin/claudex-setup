@@ -21,6 +21,17 @@ ask() {
   case "$reply" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
 }
 
+# Number of models the proxy currently exposes. Prints an integer (0 on any error).
+model_count() {
+  [[ -f "$API_KEY_FILE" ]] || { echo 0; return; }
+  local key; key="$(cat "$API_KEY_FILE")"
+  curl --connect-timeout 5 --max-time 15 -fsS "$BASE_URL/v1/models" \
+    -H "Authorization: Bearer $key" 2>/dev/null \
+    | python3 -c 'import json,sys
+try: print(len(json.load(sys.stdin).get("data",[])))
+except Exception: print(0)' 2>/dev/null || echo 0
+}
+
 proxy_reachable() {
   [[ -f "$API_KEY_FILE" ]] || return 1
   local key; key="$(cat "$API_KEY_FILE")"
@@ -28,8 +39,34 @@ proxy_reachable() {
     -H "Authorization: Bearer $key" >/dev/null 2>&1
 }
 
-has_auth() {
+has_auth_files() {
   [[ -d "$CONFIG_DIR" ]] && find "$CONFIG_DIR" -maxdepth 2 -type f -name '*.json' 2>/dev/null | grep -q .
+}
+
+# Is a desktop browser plausibly available for an OAuth redirect?
+browser_available() {
+  # Remote/SSH sessions can't open a local browser.
+  [[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]] && return 1
+  case "$(uname -s)" in
+    Darwin) return 0 ;;
+    *) [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v xdg-open >/dev/null 2>&1 ;;
+  esac
+}
+
+# Run an OAuth login, letting the user choose browser vs device-code. Defaults to
+# device-code when we detect SSH/headless so remote setups don't get stuck.
+do_login() {
+  local default=1 choice
+  if ! browser_available; then default=2; fi
+  echo "  1) Browser OAuth"
+  echo "  2) Device code (SSH / headless)"
+  printf '  Login method [1-2, Enter=%s]: ' "$default"
+  read -r choice </dev/tty || choice=""
+  [[ -z "$choice" ]] && choice="$default"
+  case "$choice" in
+    2) "$BIN_DIR/claudex-auth" codex-device ;;
+    *) "$BIN_DIR/claudex-auth" codex ;;
+  esac
 }
 
 b "claudex setup"
@@ -40,7 +77,7 @@ if ! { [ -r /dev/tty ] && [ -t 1 ]; }; then
   cat <<EOF
 
 Run these to finish:
-  claudex-auth codex     # sign in (opens a browser)
+  claudex-auth codex     # sign in (opens a browser; use codex-device on SSH)
   claudex-proxy start    # start the local proxy
   claudex-models set     # pick your models
   claudex                # launch Claude Code
@@ -60,14 +97,12 @@ fi
 
 # 2. Authentication
 step "Authentication"
-if has_auth; then
-  ok "Already authenticated (tokens in $CONFIG_DIR)"
-  if ask "Re-authenticate with Codex?"; then
-    "$BIN_DIR/claudex-auth" codex || warn "Auth did not complete."
-  fi
+if has_auth_files; then
+  ok "Found existing credentials in $CONFIG_DIR"
+  if ask "Sign in again?"; then do_login || warn "Auth did not complete."; fi
 else
-  if ask "Sign in with Codex now (opens a browser)?"; then
-    "$BIN_DIR/claudex-auth" codex || warn "Auth did not complete — re-run: claudex-auth codex"
+  if ask "Sign in now?"; then
+    do_login || warn "Auth did not complete — re-run: claudex-auth codex (or codex-device)"
   else
     warn "Skipped. You'll need to run: claudex-auth codex"
   fi
@@ -85,13 +120,23 @@ else
   fi
 fi
 
-# 4. Models
+# 4. Readiness + models
 step "Model selection"
 if proxy_reachable; then
-  if ask "Pick your models now?"; then
-    "$BIN_DIR/claudex-models" set || warn "Model picker didn't finish — re-run: claudex-models set"
+  count="$(model_count)"
+  if [[ "$count" -gt 0 ]]; then
+    ok "$count models available"
+    if ask "Pick your models now?"; then
+      "$BIN_DIR/claudex-models" set || warn "Model picker didn't finish — re-run: claudex-models set"
+    else
+      warn "Skipped. Choose later with: claudex-models set"
+    fi
   else
-    warn "Skipped. Choose later with: claudex-models set"
+    warn "Proxy is up but no models are available."
+    echo "  Your login likely failed or expired. Re-authenticate, then run: claudex-models set"
+    if ask "Sign in again now?"; then
+      do_login && "$BIN_DIR/claudex-proxy" restart >/dev/null 2>&1 || true
+    fi
   fi
 else
   warn "Proxy isn't reachable yet, so skipping model selection."

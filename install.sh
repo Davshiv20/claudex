@@ -25,6 +25,7 @@ VOUCHED_CLIPROXY_VERSION="v7.2.93"
 MIN_RELEASE_AGE_DAYS="${CLAUDEX_MIN_RELEASE_AGE_DAYS:-7}"
 CLIPROXY_VERSION=""   # resolved in install_cliproxyapi
 RESET_CONFIG=0
+RUN_SETUP=0
 
 log() { printf '\033[1;34m[claudex]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[claudex]\033[0m %s\n' "$*"; }
@@ -37,6 +38,7 @@ Usage: ./install.sh [options]
 Options:
   --reset        Overwrite an existing CLIProxyAPI config.yaml (a backup is kept).
                  By default an existing config is preserved.
+  --setup        Launch the guided setup (claudex-setup) when the install finishes.
   -h, --help     Show this help.
 
 Environment:
@@ -56,6 +58,7 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reset|--overwrite) RESET_CONFIG=1 ;;
+    --setup) RUN_SETUP=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "Unknown option: $1 (see --help)" ;;
   esac
@@ -66,6 +69,22 @@ mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CONFIG_DIR/logs"
 
 CURL=(curl --connect-timeout 10 --max-time 120 -fsSL)
 RELEASES_API="https://api.github.com/repos/router-for-me/CLIProxyAPI/releases"
+
+# Render a template to stdout, replacing __KEY__ placeholders with values using
+# literal (non-regex) substitution, so values containing #, &, or backslashes
+# are handled safely (unlike sed s### replacement).
+render_template() {
+  local tpl="$1"; shift
+  TPL_PATH="$tpl" python3 - "$@" <<'PY'
+import os, sys
+with open(os.environ["TPL_PATH"]) as f:
+    data = f.read()
+args = sys.argv[1:]
+for i in range(0, len(args), 2):
+    data = data.replace(args[i], args[i + 1])
+sys.stdout.write(data)
+PY
+}
 
 # SHA256 of the VOUCHED release's assets, embedded in this repo so the pinned
 # version is verified against a value we control — NOT one fetched from the same
@@ -285,8 +304,9 @@ write_config() {
   fi
 
   tmp="$(mktemp "$CONFIG_DIR/.config.XXXXXX")"
-  sed "s#__CLAUDEX_API_KEY__#${api_key}#g; s#__CLIPROXY_CONFIG_DIR__#${CONFIG_DIR}#g" \
-    "$ROOT_DIR/templates/config.yaml" > "$tmp"
+  render_template "$ROOT_DIR/templates/config.yaml" \
+    "__CLAUDEX_API_KEY__" "$api_key" \
+    "__CLIPROXY_CONFIG_DIR__" "$CONFIG_DIR" > "$tmp"
   chmod 600 "$tmp"
   mv "$tmp" "$CONFIG_FILE"
   log "Wrote $CONFIG_FILE"
@@ -304,11 +324,11 @@ install_models_conf() {
 install_wrappers() {
   local f
   for f in claudex claudex-auth claudex-proxy claudex-models claudex-doctor claudex-uninstall claudex-update claudex-setup; do
-    sed "s#__CLAUDEX_INSTALL_DIR__#${INSTALL_DIR}#g; \
-         s#__CLIPROXY_CONFIG_FILE__#${CONFIG_FILE}#g; \
-         s#__CLIPROXY_CONFIG_DIR__#${CONFIG_DIR}#g; \
-         s#__CLAUDEX_REPO_DIR__#${ROOT_DIR}#g" \
-      "$ROOT_DIR/bin/$f" > "$BIN_DIR/$f"
+    render_template "$ROOT_DIR/bin/$f" \
+      "__CLAUDEX_INSTALL_DIR__" "$INSTALL_DIR" \
+      "__CLIPROXY_CONFIG_FILE__" "$CONFIG_FILE" \
+      "__CLIPROXY_CONFIG_DIR__" "$CONFIG_DIR" \
+      "__CLAUDEX_REPO_DIR__" "$ROOT_DIR" > "$BIN_DIR/$f"
     chmod +x "$BIN_DIR/$f"
   done
 }
@@ -346,5 +366,11 @@ update_shell
 
 printf '\n'
 log "claudex installed."
+
+if [[ "$RUN_SETUP" -eq 1 ]]; then
+  export PATH="$BIN_DIR:$PATH"
+  exec "$BIN_DIR/claudex-setup"
+fi
+
 log "Open a new shell (or run: export PATH=\"$BIN_DIR:\$PATH\")"
 log "Then finish in one guided step:  \033[1mclaudex-setup\033[0m"

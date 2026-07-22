@@ -19,38 +19,49 @@ Verify your setup at any time with `claudex-doctor`.
 
 ## Quick start
 
-One line — clones the repo and runs the verified installer:
+One line, pinned to a released version — clones the repo and runs the verified installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/v0.1.0/bootstrap.sh | bash
 ```
 
-If you have a terminal, it drops you straight into the guided setup. Otherwise, open a new shell and run:
-
-```bash
-claudex-setup
-```
-
-That's it — `claudex-setup` handles sign-in, starts the proxy, and lets you pick your models. Then launch Claude Code on your models:
+If you have a terminal it drops you straight into the guided setup; otherwise open a new shell and run `claudex-setup`. That wizard handles sign-in, starts the proxy, and lets you pick your models. Then:
 
 ```bash
 claudex
 ```
 
-### Prefer to read the code first?
+### Prefer to read before you run? (recommended)
 
-Clone and install manually — same result, nothing hidden:
+Download the bootstrap, read it, then run it:
 
 ```bash
-git clone https://github.com/Davshiv20/claudex.git
-cd claudex
-./install.sh
-claudex-setup   # open a new shell first so claudex-* is on your PATH
+curl -fsSLO https://raw.githubusercontent.com/Davshiv20/claudex/v0.1.0/bootstrap.sh
+less bootstrap.sh
+bash bootstrap.sh
 ```
 
-The bootstrap script only clones this repo and runs `install.sh`; it does not pipe any opaque logic into your shell, and the CLIProxyAPI binary is still checksum-verified. Run `claudex-doctor` any time to check your setup.
+Or clone and install manually — same result:
 
-Rather run the steps yourself? `claudex-setup` is just: `claudex-auth codex` → `claudex-proxy start` → `claudex-models set`.
+```bash
+git clone --branch v0.1.0 https://github.com/Davshiv20/claudex.git
+cd claudex
+./install.sh --setup    # runs the guided wizard right after installing
+```
+
+The bootstrap only clones this repo and runs `install.sh` — it pipes no opaque logic into your shell, and the CLIProxyAPI binary is still checksum-verified. Run `claudex-doctor` any time to check your setup.
+
+### Bleeding edge
+
+Install the latest unreleased `main` (mutable — use a tag for reproducibility):
+
+```bash
+CLAUDEX_REF=main bash -c "$(curl -fsSL https://raw.githubusercontent.com/Davshiv20/claudex/main/bootstrap.sh)"
+```
+
+### What the wizard does
+
+`claudex-setup` is just: `claudex-auth codex` (or `codex-device` on SSH/headless) → `claudex-proxy start` → `claudex-models set`. It auto-suggests device-code login when it detects an SSH or headless session, and skips steps you've already completed.
 
 ## Choosing your models
 
