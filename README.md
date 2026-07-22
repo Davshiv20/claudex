@@ -1,36 +1,43 @@
 # claudex
 
-One-command setup for running GPT/Codex models inside Claude Code via [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
+Guided setup for running GPT/Codex (or Gemini) models inside [Claude Code](https://docs.anthropic.com/en/docs/claude-code) via [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
 
-It installs/configures a local CLIProxyAPI server, authenticates Claude and/or Codex, and adds a `claudex` command that launches `claude` with the right Anthropic-compatible proxy environment.
+claudex installs and configures a **local** CLIProxyAPI server, helps you authenticate Codex/Claude, and adds a `claudex` command that launches `claude` pointed at the proxy through Anthropic-compatible environment variables. You keep the Claude Code UX; the models behind it are yours to choose.
+
+> [!NOTE]
+> This is a **guided, minimal setup** — not a single command. You'll install prerequisites, run the installer, authenticate once via OAuth, start the proxy, and pick your models. Each step is one command and is explained below.
+
+## Prerequisites
+
+- **macOS or Linux** (arm64 or x86_64). Windows is not supported by these wrappers.
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed (the `claude` command). claudex wraps it; it does not install it.
+- **`bash`, `curl`, `python3`** (present on macOS and most Linux distros).
+- A **Codex/ChatGPT account** (and/or Claude, Gemini) to authenticate the proxy against.
+- Optional: **[`fzf`](https://github.com/junegunn/fzf)** for fuzzy model selection, **Homebrew** on macOS (used to install CLIProxyAPI when available).
+
+Verify your setup at any time with `claudex-doctor`.
 
 ## Quick start
 
 ```bash
-git clone <your-repo-url> claudex
+git clone https://github.com/Davshiv20/claudex.git
 cd claudex
 ./install.sh
 ```
 
-Then authenticate at least Codex:
+Open a new shell (or `source ~/.zshrc`) so the `claudex` commands are on your `PATH`, then:
 
 ```bash
-claudex-auth codex
-# optional, if you also want Claude OAuth available behind the proxy
+claudex-auth codex          # browser OAuth for OpenAI/Codex
+# optional: also expose Claude OAuth behind the proxy
 claudex-auth claude
+
+claudex-proxy start         # start the local proxy
+claudex-models set          # pick your models (guided)
+claudex                     # launch Claude Code backed by your chosen models
 ```
 
-Start the proxy:
-
-```bash
-claudex-proxy start
-```
-
-Run Claude Code backed by GPT/Codex:
-
-```bash
-claudex
-```
+Run `claudex-doctor` if anything looks off.
 
 ## Choosing your models
 
@@ -47,12 +54,20 @@ claudex-models set opus      # just re-pick one slot
 ```
 
 Each step shows which slot you're configuring, your current choice, the list of
-available models, and a reasoning-effort menu (high/medium/low/none).
+available (chat-capable) models, and a reasoning-effort menu (high/medium/low/none).
 
 Prefer to type it directly? Pass the model and skip the prompts:
 
 ```bash
 claudex-models set haiku gpt-5.4-mini(low)
+```
+
+Quickly dial effort up or down across all slots with a **profile**:
+
+```bash
+claudex-models profile cheap      # every slot -> low effort
+claudex-models profile balanced   # high / medium / low
+claudex-models profile max        # high / high / medium
 ```
 
 Other commands:
@@ -72,39 +87,120 @@ When you run `claudex`, it prints the active map so it's never a mystery:
 [claudex] Opus:gpt-5.5(high)  Sonnet:gpt-5.5(medium)  Haiku:gpt-5.4-mini(low)
 ```
 
-## What gets installed
-
-- CLIProxyAPI binary (`cliproxyapi` Homebrew formula if available, otherwise upstream release binary)
-- `~/.cli-proxy-api/config.yaml`
-- `~/.claudex/models.conf` (your Opus/Sonnet/Haiku model map)
-- wrapper commands in `~/.claudex/bin`:
-  - `claudex`
-  - `claudex-auth`
-  - `claudex-proxy`
-  - `claudex-models`
-- shell PATH snippet in `~/.zshrc` or `~/.bashrc`
-
-## Defaults & precedence
-
-Out of the box `claudex-models show` maps all three slots to `gpt-5-codex`
-(high/medium/low). Change them any time with `claudex-models set` or by editing
-`~/.claudex/models.conf`.
-
-Model resolution follows this precedence (highest wins):
+### Model resolution precedence
 
 1. `CLAUDEX_OPUS_MODEL` / `CLAUDEX_SONNET_MODEL` / `CLAUDEX_HAIKU_MODEL` env vars
 2. `~/.claudex/models.conf`
 3. built-in fallback (`gpt-5-codex(...)`)
 
-So you can still override a single run without touching your config:
+So you can override a single run without touching your config:
 
 ```bash
 CLAUDEX_SONNET_MODEL='gpt-5.5(high)' claudex
-CLAUDEX_HAIKU_MODEL='gpt-5.4-mini(low)' claudex
 ```
 
-## Notes
+## How it works / data flow
 
-- The proxy listens locally only by default.
-- Your OAuth tokens stay in `~/.cli-proxy-api/` and are **not** part of this repo.
-- If Claude Code is v1.x, the wrapper also sets `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` for backwards compatibility.
+Everything runs on your machine. Claude Code talks to `127.0.0.1`, and the proxy
+forwards requests to the upstream provider using your OAuth credentials.
+
+```mermaid
+flowchart LR
+    CC[Claude Code<br/>claude CLI] -->|Anthropic API<br/>127.0.0.1:8317| P[CLIProxyAPI<br/>local proxy]
+    P -->|OAuth token| U[Upstream provider<br/>OpenAI / Anthropic / Google]
+    K[~/.claudex/api-key] -.local auth.-> CC
+    T[~/.cli-proxy-api/*.json<br/>OAuth tokens] -.-> P
+```
+
+- **Local-only by default.** The proxy binds to `127.0.0.1:8317`; nothing is exposed to your network.
+- **Local auth token.** A random `sk-claudex-…` key in `~/.claudex/api-key` authenticates Claude Code to the proxy. It is not an provider key and never leaves your machine.
+- **Provider OAuth.** `claudex-auth` performs a normal browser OAuth login. Tokens are stored by CLIProxyAPI under `~/.cli-proxy-api/` (mode `0600`) and are **never** part of this repo.
+- **Your prompts and code** flow from Claude Code → local proxy → your chosen provider, exactly as they would if you used that provider directly. claudex adds no telemetry of its own.
+
+## Billing & cost
+
+- claudex is free and does not bill you. **Your usage is billed by the upstream provider** (OpenAI/Anthropic/Google) according to your account/plan.
+- Model choice and reasoning effort directly affect cost and latency. `high` effort is slower and more expensive; use `claudex-models profile cheap` to dial everything down.
+- Costs shown inside Claude Code's model picker come from Claude Code, not from claudex, and may not reflect your actual provider pricing.
+
+## Telemetry
+
+- CLIProxyAPI's usage statistics are **disabled by default** in the config claudex writes (`usage-statistics-enabled: false`). Set it to `true` in `~/.cli-proxy-api/config.yaml` to opt in.
+- claudex itself sends no telemetry.
+
+## Security & supply chain
+
+- **Pinned + verified binary.** The installer downloads a specific, reviewed CLIProxyAPI version and verifies its **SHA256** against the release `checksums.txt`. A mismatch aborts the install.
+- **Minimum release age.** Any version other than the vouched pin (including `CLAUDEX_CLIPROXY_VERSION=latest`) must be at least **7 days old**, so brand-new releases are given time to be caught before they're installed. Tune with `CLAUDEX_MIN_RELEASE_AGE_DAYS` (set `0` to disable).
+- **Private secrets.** The installer runs with `umask 077` and writes `api-key` and `config.yaml` atomically at mode `0600` — they are never briefly world-readable.
+- **Non-destructive config.** An existing `~/.cli-proxy-api/config.yaml` is **preserved**; pass `--reset` to overwrite (a timestamped backup is kept either way).
+- **Safe process control.** `claudex-proxy stop` only kills a PID that is actually a `cli-proxy-api` process, and clears stale PID files, so it won't kill an unrelated process.
+
+Install options:
+
+```bash
+./install.sh --reset                              # overwrite existing CLIProxy config
+CLAUDEX_CLIPROXY_VERSION=v7.2.93 ./install.sh      # pin a specific version
+CLAUDEX_CLIPROXY_VERSION=latest ./install.sh       # newest release >= min age
+CLAUDEX_MIN_RELEASE_AGE_DAYS=14 ./install.sh       # stricter soak period
+```
+
+## Maintenance
+
+```bash
+claudex-doctor       # health check: deps, perms, auth, proxy, model map
+claudex-update       # pull latest repo + refresh CLIProxyAPI and wrappers
+claudex-uninstall    # remove wrappers, config, PATH/alias (keeps OAuth tokens)
+claudex-uninstall --purge   # also delete ~/.cli-proxy-api (OAuth tokens included)
+```
+
+## What gets installed
+
+- CLIProxyAPI binary (Homebrew formula if available, otherwise a pinned, checksum-verified release binary)
+- `~/.cli-proxy-api/config.yaml` and `~/.cli-proxy-api/` for OAuth tokens/logs
+- `~/.claudex/api-key` (local proxy auth token, mode `0600`)
+- `~/.claudex/models.conf` (your Opus/Sonnet/Haiku model map)
+- wrapper commands in `~/.claudex/bin`:
+  - `claudex` — launch Claude Code with your model map
+  - `claudex-auth` — OAuth login (codex/claude)
+  - `claudex-proxy` — start/stop/status/logs/models
+  - `claudex-models` — pick/list/show/profile models
+  - `claudex-doctor` — health check
+  - `claudex-update` — update in place
+  - `claudex-uninstall` — clean removal
+- a PATH + alias snippet in `~/.zshrc`, `~/.bashrc`, or `~/.profile`
+
+## Troubleshooting
+
+| Symptom | Try |
+| --- | --- |
+| `claudex` says Claude Code not found | Install Claude Code so `claude` is on your `PATH`. |
+| Commands not found after install | Open a new shell or `source ~/.zshrc`. |
+| `proxy not reachable` | `claudex-proxy start`, then `claudex-proxy status`. Check `claudex-proxy logs`. |
+| `claudex-models list` fails | The proxy must be running and you must be authenticated (`claudex-auth codex`). |
+| Model picker shows nothing | No chat models for your account, or the proxy is down. Run `claudex-doctor`. |
+| Checksum mismatch on install | Re-run; if it persists, the release may have changed. Do **not** use `CLAUDEX_SKIP_CHECKSUM=1` unless you trust the source. |
+| Auth expired | Re-run `claudex-auth codex` (or `claude`). |
+
+Start with `claudex-doctor` — it points at the most likely fix.
+
+## Compatibility
+
+| Component | Supported |
+| --- | --- |
+| OS | macOS (arm64/x86_64), Linux (arm64/x86_64) |
+| Shell | zsh, bash (profile fallback otherwise) |
+| Claude Code | v1.x and v2.x (v1.x also gets `ANTHROPIC_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL`) |
+| CLIProxyAPI | pinned `v7.2.93` (override with `CLAUDEX_CLIPROXY_VERSION`) |
+
+## Development
+
+```bash
+bash tests/run.sh    # static checks + hermetic unit/integration tests (no network)
+```
+
+CI runs the same suite on macOS and Linux via GitHub Actions (`.github/workflows/ci.yml`).
+
+## License
+
+[MIT](./LICENSE) © 2026 Shivam

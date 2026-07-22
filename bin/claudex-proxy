@@ -1,20 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+INSTALL_DIR="__CLAUDEX_INSTALL_DIR__"
 CONFIG_FILE="__CLIPROXY_CONFIG_FILE__"
-LOG_DIR="$HOME/.cli-proxy-api/logs"
-PID_FILE="$HOME/.cli-proxy-api/claudex-proxy.pid"
+CONFIG_DIR="__CLIPROXY_CONFIG_DIR__"
+LOG_DIR="$CONFIG_DIR/logs"
+PID_FILE="$CONFIG_DIR/claudex-proxy.pid"
+API_KEY_FILE="$INSTALL_DIR/api-key"
+BASE_URL="http://127.0.0.1:8317"
 
 cliproxy_bin() {
   if command -v cliproxyapi >/dev/null 2>&1; then echo cliproxyapi; return; fi
   if command -v cli-proxy-api >/dev/null 2>&1; then echo cli-proxy-api; return; fi
-  if [[ -x "__CLAUDEX_INSTALL_DIR__/bin/cli-proxy-api" ]]; then echo "__CLAUDEX_INSTALL_DIR__/bin/cli-proxy-api"; return; fi
+  if [[ -x "$INSTALL_DIR/bin/cli-proxy-api" ]]; then echo "$INSTALL_DIR/bin/cli-proxy-api"; return; fi
   echo "CLIProxyAPI not found. Run install.sh first." >&2
   exit 1
 }
 
+# True only if the PID file points at a live process that is actually a
+# cli-proxy-api process (guards against stale/reused PIDs killing something else).
 is_running() {
-  [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" >/dev/null 2>&1
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  local cmd
+  cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+  case "$cmd" in
+    *cli-proxy-api*|*cliproxyapi*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+clear_stale_pid() {
+  if [[ -f "$PID_FILE" ]] && ! is_running; then
+    rm -f "$PID_FILE"
+  fi
 }
 
 case "${1:-status}" in
@@ -24,11 +46,12 @@ case "${1:-status}" in
       echo "CLIProxyAPI already running (pid $(cat "$PID_FILE"))"
       exit 0
     fi
+    clear_stale_pid
     nohup "$(cliproxy_bin)" -config "$CONFIG_FILE" > "$LOG_DIR/stdout.log" 2> "$LOG_DIR/stderr.log" &
     echo $! > "$PID_FILE"
     sleep 1
     if is_running; then
-      echo "Started CLIProxyAPI on http://127.0.0.1:8317 (pid $(cat "$PID_FILE"))"
+      echo "Started CLIProxyAPI on $BASE_URL (pid $(cat "$PID_FILE"))"
     else
       echo "Failed to start. See $LOG_DIR/stderr.log" >&2
       exit 1
@@ -40,6 +63,7 @@ case "${1:-status}" in
       rm -f "$PID_FILE"
       echo "Stopped CLIProxyAPI"
     else
+      clear_stale_pid
       echo "CLIProxyAPI is not running"
     fi
     ;;
@@ -51,6 +75,7 @@ case "${1:-status}" in
     if is_running; then
       echo "running (pid $(cat "$PID_FILE"))"
     else
+      clear_stale_pid
       echo "stopped"
     fi
     ;;
@@ -58,8 +83,9 @@ case "${1:-status}" in
     tail -f "$LOG_DIR/stdout.log" "$LOG_DIR/stderr.log"
     ;;
   models)
-    key="$(cat "__CLAUDEX_INSTALL_DIR__/api-key")"
-    curl -fsS http://127.0.0.1:8317/v1/models -H "Authorization: Bearer $key" | python3 -m json.tool
+    key="$(cat "$API_KEY_FILE")"
+    curl --connect-timeout 10 --max-time 30 -fsS "$BASE_URL/v1/models" \
+      -H "Authorization: Bearer $key" | python3 -m json.tool
     ;;
   *)
     echo "Usage: claudex-proxy <start|stop|restart|status|logs|models>" >&2

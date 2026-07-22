@@ -13,6 +13,8 @@ Commands:
 USAGE
 }
 
+CONFIG_DIR="__CLIPROXY_CONFIG_DIR__"
+
 cliproxy_bin() {
   if command -v cliproxyapi >/dev/null 2>&1; then echo cliproxyapi; return; fi
   if command -v cli-proxy-api >/dev/null 2>&1; then echo cli-proxy-api; return; fi
@@ -33,7 +35,7 @@ case "$cmd" in
     exec "$(cliproxy_bin)" -claude-login
     ;;
   status)
-    find "$HOME/.cli-proxy-api" -maxdepth 2 -type f | sed "s#^$HOME#~#" | sort
+    find "$CONFIG_DIR" -maxdepth 2 -type f | sed "s#^$HOME#~#" | sort
     ;;
   -h|--help|help|"")
     usage

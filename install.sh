@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Secrets and config must never be world-readable, even briefly. Setting a
+# strict umask up front means every file/dir we create starts private (0600/0700).
+umask 077
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${CLAUDEX_INSTALL_DIR:-$HOME/.claudex}"
 BIN_DIR="$INSTALL_DIR/bin"
@@ -10,15 +14,143 @@ API_KEY_FILE="$INSTALL_DIR/api-key"
 MODELS_CONF="$INSTALL_DIR/models.conf"
 SHELL_RC=""
 
+# Pinned by default for reproducible, reviewable installs. Override with:
+#   CLAUDEX_CLIPROXY_VERSION=vX.Y.Z ./install.sh
+#
+# VOUCHED_CLIPROXY_VERSION is the version this repo has reviewed and vouches for.
+# It installs with no age check. Any *other* version (including "latest") must be
+# at least MIN_RELEASE_AGE_DAYS old, so brand-new (possibly bad/unsafe) releases
+# are given time to be caught before we install them.
+VOUCHED_CLIPROXY_VERSION="v7.2.93"
+MIN_RELEASE_AGE_DAYS="${CLAUDEX_MIN_RELEASE_AGE_DAYS:-7}"
+CLIPROXY_VERSION=""   # resolved in install_cliproxyapi
+RESET_CONFIG=0
+
 log() { printf '\033[1;34m[claudex]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[claudex]\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31m[claudex]\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+Usage: ./install.sh [options]
+
+Options:
+  --reset        Overwrite an existing CLIProxyAPI config.yaml (a backup is kept).
+                 By default an existing config is preserved.
+  -h, --help     Show this help.
+
+Environment:
+  CLAUDEX_CLIPROXY_VERSION=vX.Y.Z   Install a specific CLIProxyAPI version.
+  CLAUDEX_CLIPROXY_VERSION=latest   Newest release that is >= the minimum age.
+  CLAUDEX_MIN_RELEASE_AGE_DAYS=N    Refuse releases younger than N days (default: 7).
+                                    Set 0 to disable the age gate.
+  CLAUDEX_SKIP_CHECKSUM=1           Skip SHA256 verification (NOT recommended).
+  CLAUDEX_INSTALL_DIR=DIR           Where claudex lives (default: ~/.claudex).
+  CLIPROXY_CONFIG_DIR=DIR           CLIProxyAPI config/auth dir (default: ~/.cli-proxy-api).
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reset|--overwrite) RESET_CONFIG=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "Unknown option: $1 (see --help)" ;;
+  esac
+  shift
+done
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CONFIG_DIR/logs"
 
-install_cliproxyapi() {
-  if command -v cliproxyapi >/dev/null 2>&1 || command -v cli-proxy-api >/dev/null 2>&1; then
-    log "CLIProxyAPI already installed"
+CURL=(curl --connect-timeout 10 --max-time 120 -fsSL)
+RELEASES_API="https://api.github.com/repos/router-for-me/CLIProxyAPI/releases"
+
+# Age (in whole days) of a release tag, printed to stdout. Non-zero on failure.
+release_age_days() {
+  local tag="$1" json
+  json="$("${CURL[@]}" "$RELEASES_API/tags/$tag" 2>/dev/null)" || return 1
+  printf '%s' "$json" | python3 -c '
+import json,sys,datetime
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+p = d.get("published_at")
+if not p:
+    sys.exit(1)
+t = datetime.datetime.strptime(p, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 86400))
+'
+}
+
+# Newest non-draft, non-prerelease tag that is at least MIN_RELEASE_AGE_DAYS old.
+resolve_latest_aged() {
+  local json
+  json="$("${CURL[@]}" "$RELEASES_API?per_page=30" 2>/dev/null)" || return 1
+  printf '%s' "$json" | MIN="$MIN_RELEASE_AGE_DAYS" python3 -c '
+import json,sys,os,datetime
+min_age = int(os.environ["MIN"])
+now = datetime.datetime.now(datetime.timezone.utc)
+try:
+    rels = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+cands = []
+for r in rels:
+    if r.get("draft") or r.get("prerelease"):
+        continue
+    p, tag = r.get("published_at"), r.get("tag_name")
+    if not p or not tag:
+        continue
+    t = datetime.datetime.strptime(p, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    if (now - t).total_seconds() // 86400 >= min_age:
+        cands.append((t, tag))
+cands.sort(reverse=True)
+if not cands:
+    sys.exit(1)
+print(cands[0][1])
+'
+}
+
+# Decide which version to install, applying the minimum-age safety policy.
+resolve_version() {
+  local requested="${CLAUDEX_CLIPROXY_VERSION:-}"
+
+  if [[ -z "$requested" ]]; then
+    CLIPROXY_VERSION="$VOUCHED_CLIPROXY_VERSION"
+    log "Using pinned CLIProxyAPI $CLIPROXY_VERSION"
     return
+  fi
+
+  if [[ "$requested" == "latest" ]]; then
+    log "Resolving newest CLIProxyAPI release at least ${MIN_RELEASE_AGE_DAYS} day(s) old"
+    local tag
+    tag="$(resolve_latest_aged)" || die "Could not find a CLIProxyAPI release >= ${MIN_RELEASE_AGE_DAYS} days old. Pin one with CLAUDEX_CLIPROXY_VERSION=vX.Y.Z."
+    CLIPROXY_VERSION="$tag"
+    log "Selected $CLIPROXY_VERSION"
+    return
+  fi
+
+  CLIPROXY_VERSION="$requested"
+  if [[ "$MIN_RELEASE_AGE_DAYS" -gt 0 && "$CLIPROXY_VERSION" != "$VOUCHED_CLIPROXY_VERSION" ]]; then
+    local age
+    if age="$(release_age_days "$CLIPROXY_VERSION")"; then
+      if (( age < MIN_RELEASE_AGE_DAYS )); then
+        die "CLIProxyAPI $CLIPROXY_VERSION is only ${age} day(s) old (minimum ${MIN_RELEASE_AGE_DAYS}). Fresh releases are held back for safety. Override with CLAUDEX_MIN_RELEASE_AGE_DAYS=0 if you're sure."
+      fi
+      log "$CLIPROXY_VERSION is ${age} day(s) old (>= ${MIN_RELEASE_AGE_DAYS}) — OK"
+    else
+      warn "Could not verify release age for $CLIPROXY_VERSION (network?). Proceeding because you pinned it explicitly."
+    fi
+  fi
+}
+
+install_cliproxyapi() {
+  if [[ "${CLAUDEX_FORCE_CLIPROXY:-0}" != "1" ]]; then
+    if command -v cliproxyapi >/dev/null 2>&1 || command -v cli-proxy-api >/dev/null 2>&1 \
+       || [[ -x "$BIN_DIR/cli-proxy-api" ]]; then
+      log "CLIProxyAPI already installed"
+      return
+    fi
   fi
 
   if command -v brew >/dev/null 2>&1; then
@@ -27,54 +159,105 @@ install_cliproxyapi() {
     if brew install cliproxyapi; then
       return
     fi
-    warn "Homebrew install failed; falling back to GitHub release binary"
+    warn "Homebrew install failed; falling back to pinned GitHub release binary"
   fi
 
-  local os arch asset tmp version bin_name
+  resolve_version
+
+  local os arch plat version_num asset tmp bin_name
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   arch="$(uname -m)"
   case "$os:$arch" in
-    darwin:arm64) asset="cli-proxy-api_darwin_arm64.tar.gz" ;;
-    darwin:x86_64) asset="cli-proxy-api_darwin_amd64.tar.gz" ;;
-    linux:aarch64|linux:arm64) asset="cli-proxy-api_linux_arm64.tar.gz" ;;
-    linux:x86_64) asset="cli-proxy-api_linux_amd64.tar.gz" ;;
-    *) echo "Unsupported platform: $os/$arch" >&2; exit 1 ;;
+    darwin:arm64)           plat="darwin_aarch64" ;;
+    darwin:x86_64)          plat="darwin_amd64" ;;
+    linux:aarch64|linux:arm64) plat="linux_aarch64" ;;
+    linux:x86_64)           plat="linux_amd64" ;;
+    *) die "Unsupported platform: $os/$arch. Install CLIProxyAPI manually and re-run." ;;
   esac
+
+  version_num="${CLIPROXY_VERSION#v}"
+  asset="CLIProxyAPI_${version_num}_${plat}.tar.gz"
   tmp="$(mktemp -d)"
-  version="$(curl -fsSL https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-  curl -fL "https://github.com/router-for-me/CLIProxyAPI/releases/download/${version}/${asset}" -o "$tmp/$asset"
+  trap 'rm -rf "$tmp"' RETURN
+
+  local base="https://github.com/router-for-me/CLIProxyAPI/releases/download/${CLIPROXY_VERSION}"
+  log "Downloading CLIProxyAPI ${CLIPROXY_VERSION} ($plat)"
+  "${CURL[@]}" "$base/$asset" -o "$tmp/$asset" \
+    || die "Download failed for $asset. Check CLAUDEX_CLIPROXY_VERSION or your network."
+
+  if [[ "${CLAUDEX_SKIP_CHECKSUM:-0}" == "1" ]]; then
+    warn "Skipping checksum verification (CLAUDEX_SKIP_CHECKSUM=1)"
+  else
+    log "Verifying SHA256 checksum"
+    if ! "${CURL[@]}" "$base/checksums.txt" -o "$tmp/checksums.txt"; then
+      die "Could not fetch checksums.txt for ${CLIPROXY_VERSION}. Re-run with CLAUDEX_SKIP_CHECKSUM=1 to bypass (not recommended)."
+    fi
+    local expected
+    expected="$(grep " ${asset}\$" "$tmp/checksums.txt" | awk '{print $1}' | head -1)"
+    [[ -n "$expected" ]] || die "No checksum entry for $asset in checksums.txt."
+    local actual
+    if command -v shasum >/dev/null 2>&1; then
+      actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+    elif command -v sha256sum >/dev/null 2>&1; then
+      actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+    else
+      die "Neither shasum nor sha256sum available to verify the download."
+    fi
+    [[ "$actual" == "$expected" ]] || die "Checksum mismatch for $asset (expected $expected, got $actual). Aborting."
+    log "Checksum OK"
+  fi
+
   tar -xzf "$tmp/$asset" -C "$tmp"
-  bin_name="$(find "$tmp" -type f \( -name 'cli-proxy-api' -o -name 'cliproxyapi' \) | head -1)"
+  bin_name="$(find "$tmp" -type f \( -iname 'cli-proxy-api' -o -iname 'cliproxyapi' \) | head -1)"
+  if [[ -z "$bin_name" ]]; then
+    # Fall back to the largest extracted file (the binary dwarfs any config/docs).
+    bin_name="$(find "$tmp" -type f ! -name '*.tar.gz' -exec ls -S {} + 2>/dev/null | head -1)"
+  fi
+  [[ -n "$bin_name" ]] || die "Could not locate the CLIProxyAPI binary inside $asset."
   install -m 0755 "$bin_name" "$BIN_DIR/cli-proxy-api"
+  log "Installed CLIProxyAPI to $BIN_DIR/cli-proxy-api"
 }
 
 make_api_key() {
-  if [[ ! -f "$API_KEY_FILE" ]]; then
-    if command -v openssl >/dev/null 2>&1; then
-      printf 'sk-claudex-%s\n' "$(openssl rand -hex 24)" > "$API_KEY_FILE"
-    else
-      printf 'sk-claudex-%s\n' "$(date +%s)-$RANDOM-$RANDOM" > "$API_KEY_FILE"
-    fi
-    chmod 600 "$API_KEY_FILE"
+  if [[ -f "$API_KEY_FILE" ]]; then
+    return
   fi
+  local tmp key
+  tmp="$(mktemp "$INSTALL_DIR/.api-key.XXXXXX")"
+  if command -v openssl >/dev/null 2>&1; then
+    key="sk-claudex-$(openssl rand -hex 24)"
+  else
+    key="sk-claudex-$(date +%s)-${RANDOM}-${RANDOM}"
+  fi
+  printf '%s\n' "$key" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$API_KEY_FILE"
 }
 
 write_config() {
-  local api_key
+  local api_key tmp
   api_key="$(cat "$API_KEY_FILE")"
+
+  if [[ -f "$CONFIG_FILE" && "$RESET_CONFIG" -ne 1 ]]; then
+    log "Preserving existing $CONFIG_FILE (use --reset to overwrite)"
+    return
+  fi
   if [[ -f "$CONFIG_FILE" ]]; then
     cp "$CONFIG_FILE" "$CONFIG_FILE.backup.$(date +%Y%m%d%H%M%S)"
     warn "Backed up existing config.yaml"
   fi
-  sed "s#__CLAUDEX_API_KEY__#${api_key}#g; s#__HOME__#${HOME}#g" \
-    "$ROOT_DIR/templates/config.yaml" > "$CONFIG_FILE"
-  chmod 600 "$CONFIG_FILE"
+
+  tmp="$(mktemp "$CONFIG_DIR/.config.XXXXXX")"
+  sed "s#__CLAUDEX_API_KEY__#${api_key}#g; s#__CLIPROXY_CONFIG_DIR__#${CONFIG_DIR}#g" \
+    "$ROOT_DIR/templates/config.yaml" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
   log "Wrote $CONFIG_FILE"
 }
 
 install_models_conf() {
   if [[ -f "$MODELS_CONF" ]]; then
-    log "Keeping existing models.conf (edit it or run: claudex-models set ...)"
+    log "Keeping existing models.conf (edit it or run: claudex-models set)"
     return
   fi
   cp "$ROOT_DIR/templates/models.conf" "$MODELS_CONF"
@@ -82,8 +265,12 @@ install_models_conf() {
 }
 
 install_wrappers() {
-  for f in claudex claudex-auth claudex-proxy claudex-models; do
-    sed "s#__CLAUDEX_INSTALL_DIR__#${INSTALL_DIR}#g; s#__CLIPROXY_CONFIG_FILE__#${CONFIG_FILE}#g" \
+  local f
+  for f in claudex claudex-auth claudex-proxy claudex-models claudex-doctor claudex-uninstall claudex-update; do
+    sed "s#__CLAUDEX_INSTALL_DIR__#${INSTALL_DIR}#g; \
+         s#__CLIPROXY_CONFIG_FILE__#${CONFIG_FILE}#g; \
+         s#__CLIPROXY_CONFIG_DIR__#${CONFIG_DIR}#g; \
+         s#__CLAUDEX_REPO_DIR__#${ROOT_DIR}#g" \
       "$ROOT_DIR/bin/$f" > "$BIN_DIR/$f"
     chmod +x "$BIN_DIR/$f"
   done
@@ -123,3 +310,4 @@ update_shell
 log "Done. Open a new shell or run: export PATH=\"$BIN_DIR:\$PATH\""
 log "Next: claudex-auth codex && claudex-proxy start && claudex"
 log "Pick your models interactively: claudex-models set"
+log "Check your setup any time:       claudex-doctor"

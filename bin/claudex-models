@@ -16,12 +16,14 @@ Commands:
   set                        Interactively pick models for all three slots
   set <slot>                 Interactively pick a model for one slot (opus|sonnet|haiku)
   set <slot> <model>         Set a slot directly, no prompts
+  profile <name>             Apply an effort preset: cheap | balanced | max
   edit                       Open models.conf in your editor
 
 Examples:
   claudex-models set                        # guided picker for Opus, Sonnet, Haiku
   claudex-models set opus                    # guided picker for just Opus
   claudex-models set haiku gpt-5.4-mini(low) # direct, no prompts
+  claudex-models profile cheap               # dial every slot down to low effort
 USAGE
 }
 
@@ -41,12 +43,62 @@ read_slot() {
   printf '%s' "$line"
 }
 
+# Validate a model value: "base" or "base(high|medium|low)".
+validate_model() {
+  if [[ "$1" =~ ^[A-Za-z0-9._-]+(\((high|medium|low)\))?$ ]]; then
+    return 0
+  fi
+  echo "Invalid model '$1'. Expected e.g. gpt-5.5 or gpt-5.5(high) — effort must be high|medium|low." >&2
+  return 1
+}
+
+# Write "SLOT = model" to models.conf via python (no shell/sed interpolation).
+write_slot() {
+  local slot="$1" model="$2"
+  validate_model "$model" || return 1
+  touch "$MODELS_CONF"
+  MODELS_CONF="$MODELS_CONF" SLOT="$slot" MODEL="$model" python3 - <<'PY'
+import os, re
+path = os.environ["MODELS_CONF"]
+slot = os.environ["SLOT"]
+model = os.environ["MODEL"]
+try:
+    with open(path) as f:
+        lines = f.readlines()
+except FileNotFoundError:
+    lines = []
+pat = re.compile(r"^\s*" + re.escape(slot) + r"\s*=")
+out, replaced = [], False
+for ln in lines:
+    if pat.match(ln):
+        out.append(f"{slot} = {model}\n"); replaced = True
+    else:
+        out.append(ln)
+if not replaced:
+    if out and not out[-1].endswith("\n"):
+        out[-1] += "\n"
+    out.append(f"{slot} = {model}\n")
+with open(path, "w") as f:
+    f.writelines(out)
+PY
+}
+
+# Change only the reasoning effort of a slot, keeping its model. No-op if unset.
+set_effort() {
+  local slot="$1" effort="$2" cur base
+  cur="$(read_slot "$slot")"
+  [[ -z "$cur" ]] && return 0
+  base="${cur%%(*}"
+  write_slot "$slot" "${base}(${effort})"
+}
+
 # Print every model id the proxy exposes, one per line (unfiltered).
 fetch_model_ids() {
   [[ -f "$API_KEY_FILE" ]] || { echo "Missing $API_KEY_FILE. Run install.sh first." >&2; return 1; }
   local key
   key="$(cat "$API_KEY_FILE")"
-  curl -fsS "$BASE_URL/v1/models" -H "Authorization: Bearer $key" 2>/dev/null \
+  curl --connect-timeout 10 --max-time 30 -fsS "$BASE_URL/v1/models" \
+    -H "Authorization: Bearer $key" 2>/dev/null \
     | python3 -c 'import json,sys
 data = json.load(sys.stdin).get("data", [])
 for m in sorted(data, key=lambda x: x.get("id","")):
@@ -55,38 +107,23 @@ for m in sorted(data, key=lambda x: x.get("id","")):
         print(mid)'
 }
 
-# Write "SLOT = model" to models.conf, replacing an existing line or appending.
-write_slot() {
-  local slot="$1" model="$2"
-  case "$model" in
-    *'#'*|*'&'*) echo "Model name contains an unsupported character (# or &)." >&2; return 1 ;;
-  esac
-  touch "$MODELS_CONF"
-  if grep -qE "^[[:space:]]*$slot[[:space:]]*=" "$MODELS_CONF"; then
-    local tmp
-    tmp="$(mktemp)"
-    sed -E "s#^([[:space:]]*$slot[[:space:]]*=).*#\1 $model#" "$MODELS_CONF" > "$tmp"
-    mv "$tmp" "$MODELS_CONF"
-  else
-    printf '%s = %s\n' "$slot" "$model" >> "$MODELS_CONF"
-  fi
-}
-
-# Load chat models into the MODEL_IDS array (image models hidden for now).
+# Load chat-capable models into MODEL_IDS (image/audio/embedding models hidden).
 load_model_ids() {
-  local raw m
+  local raw m lower
   raw="$(fetch_model_ids)" || return 1
   MODEL_IDS=()
   while IFS= read -r m; do
     [[ -z "$m" ]] && continue
-    case "$m" in gpt-image-*) continue ;; esac
+    lower="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+      *image*|*embedding*|*whisper*|*-tts*|*audio*|*moderation*|*rerank*) continue ;;
+    esac
     MODEL_IDS+=("$m")
   done <<< "$raw"
   [[ ${#MODEL_IDS[@]} -gt 0 ]] || { echo "No chat models available from $BASE_URL." >&2; return 1; }
 }
 
 # Prompt the user to choose one model; echoes the chosen id on stdout.
-# Menu/prompts go to stderr so stdout captures only the selection.
 choose_model() {
   local label="$1"
   if command -v fzf >/dev/null 2>&1; then
@@ -201,6 +238,19 @@ case "${1:-}" in
     fi
     write_slot "$slot" "$3" || exit 1
     echo "Set $slot = $3"
+    echo "Restart claudex for the change to take effect."
+    ;;
+  profile)
+    case "${2:-}" in
+      max)      set_effort OPUS high;   set_effort SONNET high;   set_effort HAIKU medium ;;
+      balanced) set_effort OPUS high;   set_effort SONNET medium; set_effort HAIKU low ;;
+      cheap)    set_effort OPUS low;    set_effort SONNET low;    set_effort HAIKU low ;;
+      *) echo "profile must be one of: cheap | balanced | max" >&2; exit 1 ;;
+    esac
+    echo "Applied '$2' profile:"
+    for slot in OPUS SONNET HAIKU; do
+      printf '  %-7s -> %s\n' "$slot" "$(read_slot "$slot")"
+    done
     echo "Restart claudex for the change to take effect."
     ;;
   edit)

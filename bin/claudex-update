@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="__CLAUDEX_REPO_DIR__"
+
+echo "Updating claudex..."
+
+if [[ ! -f "$REPO_DIR/install.sh" ]]; then
+  echo "Cannot find the claudex repo at $REPO_DIR." >&2
+  echo "Re-clone it and run ./install.sh manually." >&2
+  exit 1
+fi
+
+if [[ -d "$REPO_DIR/.git" ]] && command -v git >/dev/null 2>&1; then
+  echo "Pulling latest from $REPO_DIR"
+  git -C "$REPO_DIR" pull --ff-only || echo "git pull skipped/failed; continuing with the local copy"
+fi
+
+if command -v brew >/dev/null 2>&1 && brew list cliproxyapi >/dev/null 2>&1; then
+  echo "Upgrading CLIProxyAPI via Homebrew"
+  brew upgrade cliproxyapi || true
+  "$REPO_DIR/install.sh"
+else
+  # Force a refresh of the pinned CLIProxyAPI binary and the wrappers.
+  CLAUDEX_FORCE_CLIPROXY=1 "$REPO_DIR/install.sh"
+fi
+
+echo "Update complete. Restart the proxy:  claudex-proxy restart"

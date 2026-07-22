@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_DIR="__CLAUDEX_INSTALL_DIR__"
+CONFIG_DIR="__CLIPROXY_CONFIG_DIR__"
+BIN_DIR="$INSTALL_DIR/bin"
+
+PURGE=0
+for arg in "$@"; do
+  case "$arg" in
+    --purge|--all) PURGE=1 ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: claudex-uninstall [--purge]
+
+Removes the claudex wrappers, config, and PATH/alias lines.
+
+  (default)   Keeps your CLIProxyAPI auth/config dir so re-installing is painless.
+  --purge     Also delete the CLIProxyAPI config dir, including OAuth tokens.
+USAGE
+      exit 0 ;;
+    *) echo "Unknown option: $arg (see --help)" >&2; exit 1 ;;
+  esac
+done
+
+echo "Uninstalling claudex..."
+
+# Stop the proxy if our wrapper is still around.
+if [[ -x "$BIN_DIR/claudex-proxy" ]]; then
+  "$BIN_DIR/claudex-proxy" stop >/dev/null 2>&1 || true
+fi
+
+# Remove shell rc lines we added (PATH snippet + alias).
+for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+  [[ -f "$rc" ]] || continue
+  if grep -q 'CLAUDEX PATH\|CLAUDEX ALIAS' "$rc" 2>/dev/null; then
+    tmp="$(mktemp)"
+    RC="$rc" BIN_DIR="$BIN_DIR" python3 - "$rc" > "$tmp" <<'PY'
+import os, sys
+bin_dir = os.environ["BIN_DIR"]
+with open(sys.argv[1]) as f:
+    for line in f:
+        s = line.strip()
+        if "CLAUDEX PATH" in line or "CLAUDEX ALIAS" in line:
+            continue
+        if bin_dir in line and (s.startswith("export PATH=") or s.startswith("alias claudex=")):
+            continue
+        sys.stdout.write(line)
+PY
+    cat "$tmp" > "$rc"
+    rm -f "$tmp"
+    echo "  cleaned PATH/alias from $rc"
+  fi
+done
+
+# Remove the claudex install dir (wrappers, api-key, models.conf).
+if [[ -d "$INSTALL_DIR" ]]; then
+  rm -rf "$INSTALL_DIR"
+  echo "  removed $INSTALL_DIR"
+fi
+
+if [[ "$PURGE" -eq 1 ]]; then
+  if [[ -d "$CONFIG_DIR" ]]; then
+    rm -rf "$CONFIG_DIR"
+    echo "  removed $CONFIG_DIR (auth tokens included)"
+  fi
+else
+  echo "  kept $CONFIG_DIR (auth/config). Use --purge to remove it too."
+fi
+
+echo "Done. Open a new shell to drop the removed PATH entry."
